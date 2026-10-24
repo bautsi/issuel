@@ -1,0 +1,14 @@
+node_modules/
+dist/
+pnpm-lock.yaml
+
+# Environment files and sensitive filenames (including mixed case).
+.[Ee][Nn][Vv]
+.[Ee][Nn][Vv].*
+*.[Ee][Nn][Vv]
+[Ll][Oo][Cc][Aa][Ll].[Ss][Ee][Tt][Tt][Ii][Nn][Gg][Ss].[Jj][Ss][Oo][Nn]
+*[Cc][Rr][Ee][Dd][Ee][Nn][Tt][Ii][Aa][Ll]*
+*[Pp][Aa][Ss][Ss][Ww][Oo][Rr][Dd]*
+*[Ss][Ee][Cc][Rr][Ee][Tt]*
+*[Tt][Oo][Kk][Ee][Nn]*
+*[Kk][Ee][Yy]*
