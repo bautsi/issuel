@@ -4,7 +4,7 @@ import { WorkspaceSelector } from '@/components/workspace-selector'
 
 type User = { id: string; login: string; name: string | null }
 
-/** Restore the session and offer repository workspaces without browser credentials. */
+/** Restore a shared session and mount repository routing only for an authenticated user. */
 export default function App() {
   const [user, setUser] = useState<User | null>(null)
   const [loading, setLoading] = useState(true)
@@ -75,6 +75,23 @@ export default function App() {
     }
   }
 
+  if (user) {
+    return (
+      <div className="min-h-svh bg-background text-foreground">
+        {/* Account and session actions */}
+        <header className="flex min-h-20 flex-wrap items-center gap-4 border-b px-6 py-4">
+          <span className="text-lg font-semibold tracking-tight">Issuel</span>
+          <span className="ml-auto text-sm text-muted-foreground">@{user.login}</span>
+          <Button onClick={logout} disabled={loggingOut} variant="outline">{loggingOut ? 'Logging out…' : 'Logout'}</Button>
+          {error && <p role="alert" className="w-full text-sm text-destructive">{error}</p>}
+        </header>
+
+        {/* User-scoped repository routing */}
+        {!loggingOut && <WorkspaceSelector key={user.id} userId={user.id} onSessionExpired={handleSessionExpired} />}
+      </div>
+    )
+  }
+
   return (
     <div className="min-h-svh bg-background text-foreground">
       {/* Header */}
@@ -115,23 +132,21 @@ export default function App() {
           <div className="flex items-center gap-3">
             <span
               aria-hidden="true"
-              className={`size-2 rounded-full ${user ? 'bg-emerald-600' : 'bg-muted-foreground'}`}
+            className="size-2 rounded-full bg-muted-foreground"
             />
             <h2 id="connection-heading" className="font-semibold">
-              {user ? 'GitHub connected' : 'Connect your workspace'}
+              Connect your workspace
             </h2>
           </div>
           <p className="mt-3 text-sm leading-6 text-muted-foreground">
-            {user
-              ? `Signed in as ${user.name ? `${user.name} (@${user.login})` : `@${user.login}`}.`
-              : 'Sign in securely with your GitHub account.'}
+            Sign in securely with your GitHub account.
           </p>
           <p
             role="status"
             aria-live="polite"
             className="mt-5 min-h-6 text-sm text-muted-foreground"
           >
-            {loading ? 'Checking your session…' : loggingOut ? 'Logging out…' : user ? 'Your session is securely stored on the server.' : 'Your GitHub tokens stay on the server.'}
+            {loading ? 'Checking your session…' : 'Your GitHub tokens stay on the server.'}
           </p>
 
           {/* Authentication errors */}
@@ -139,23 +154,15 @@ export default function App() {
 
           {/* Authentication actions */}
           <div className="mt-5 flex gap-3">
-            {user ? (
-              <Button onClick={logout} disabled={loading || loggingOut} variant="outline">
-                {loggingOut ? 'Logging out…' : 'Logout'}
-              </Button>
-            ) : (
-              <form method="post" action="/api/auth/login">
-                <Button type="submit" disabled={loading || !configured}>Connect GitHub</Button>
-              </form>
-            )}
+            <form method="post" action="/api/auth/login">
+              <Button type="submit" disabled={loading || !configured}>Connect GitHub</Button>
+            </form>
             {error && !loading && (
               <Button variant="outline" onClick={() => window.location.reload()}>Try again</Button>
             )}
           </div>
         </section>
 
-        {/* Repository workspace */}
-        {user && <WorkspaceSelector key={user.id} userId={user.id} onSessionExpired={handleSessionExpired} />}
       </main>
 
       {/* Footer */}

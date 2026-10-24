@@ -229,3 +229,28 @@ Use an already configured running server and an actual GitHub App session:
 7. With accounts exceeding 100 installations or 100 repositories in one installation, confirm later pages appear. Without such real accounts, pagination can only be checked using a local mock; do not treat that as live GitHub acceptance.
 
 Access changes are discovered on a fresh request, not pushed by webhook. There is no periodic background polling, permanent repository cache, workspace database table, or repository-specific data endpoint in this phase.
+
+## Isolated repository workspaces (ISL-4)
+
+React Router opens repositories at `/workspace/:owner/:repo`. Selecting a repository adds a browser-history entry; Back/Forward, direct links and refresh restore the corresponding workspace. Opening `/` restores the last accessible repository ID after discovery. The existing Vite development fallback and Hono production HTML fallback serve direct workspace links.
+
+`GET /api/workspaces/:owner/:repo` reuses the existing authenticated session, token refresh and complete repository discovery. It returns the accessible repository list and the verified `repository`, or `404 workspace_not_found` with `repository: null`. Missing/expired sessions return 401. Browser storage and history cannot authorize access. Each route change, retry, picker opening and window focus checks current GitHub access; the previous workspace is hidden immediately during verification. A failed request never displays a stale workspace. Logout unmounts the workspace and invalidates the existing server session.
+
+Names are mutable routing labels; GitHub user ID and numeric repository ID determine workspace identity. Browser history stores both IDs as an untrusted identity hint, so an existing history entry follows a renamed repository even if its old name is reused. The server always matches that hint against fresh access. Direct links use the current owner/name; an old link can follow GitHub's rename redirect, with at most three redirects restricted to `https://api.github.com`. The browser replaces the old URL with the current canonical owner/name. If GitHub no longer redirects an old name, an old name-only link cannot recover the original repository; choose its current name from the selector. See [GitHub repository renaming](https://docs.github.com/en/repositories/creating-and-managing-repositories/renaming-a-repository).
+
+The workspace component is keyed by user ID and repository ID. Local UI preferences use `issuel:preferences:<github-user-id>:<repository-id>`, separately from the existing last-selection key `issuel:workspace:<github-user-id>`. Defaults are Backlog/Todo/In Progress expanded, Done collapsed, Last Updated sort and empty filters. Only default sorting has a control in this phase; group/filter controls belong to the future issues UI. Invalid stored values fall back to defaults, and blocked storage keeps preferences usable in memory for the current mounted workspace with a warning. Logout preserves local preferences. No preferences are stored in SQLite or GitHub.
+
+There is no issue request or query cache yet. Future repository query keys must follow `['github', userId, repositoryId, resourceType, ...identifiers]`; never use owner/name alone or omit the user. No TanStack Query dependency, unused queries, issue data, business tables, polling or synchronization service were added.
+
+### Workspace acceptance checks
+
+With your configured server and real GitHub App session:
+
+1. Select A, change **Default sort** to Title, switch to B and confirm its URL and default Last Updated sort. Change B to Created, then switch back to A: Title must restore. Repeat with another GitHub user to confirm independent preferences.
+2. Use Back/Forward between A and B. Paste either canonical URL in a new tab and refresh. Confirm the correct repository appears only after access verification, without another OAuth flow.
+3. Open a nonexistent repository URL and a real repository outside the App grant. Both must show the unavailable/not-authorized screen without rendering repository content. Remove access to the current repository, return to the tab or refresh, and confirm it is rejected. Local preference/history edits must not bypass this check.
+4. Rename A, then revisit its existing history entry or refresh it. Confirm the canonical URL changes while repository ID and sort remain unchanged. Repeat with an old name-only link while GitHub still redirects it. A newly created repository reusing the old name must have its own ID/preferences.
+5. Logout and revisit a workspace URL: only the login screen should remain. Verify `/api/workspaces/owner/repo` returns 401 without a session. Recheck existing login, session restoration, token refresh and logout with your real GitHub App.
+6. Block localStorage or insert malformed preference JSON. Confirm safe defaults and a usable workspace. Group expansion and filter defaults are storage foundations only; there is no Issues List to exercise them yet.
+
+Real authorization, removal of GitHub permissions, repository renaming and OAuth/token-refresh acceptance require a configured GitHub App; static checks or an unauthenticated preview do not confirm those external scenarios.

@@ -35,17 +35,27 @@ export class RepositoryError extends Error {
 async function github(path: string, accessToken: string) {
   let response: Response
   try {
-    response = await fetch(`https://api.github.com${path}`, {
-      headers: {
-        Accept: 'application/vnd.github+json',
-        Authorization: `Bearer ${accessToken}`,
-        'X-GitHub-Api-Version': '2026-03-10',
-        'User-Agent': 'Issuel',
-      },
-      signal: AbortSignal.timeout(10_000),
-      redirect: 'error',
-      cache: 'no-store',
-    })
+    let url = new URL(path, 'https://api.github.com')
+    for (let redirects = 0; ; redirects++) {
+      response = await fetch(url, {
+        headers: {
+          Accept: 'application/vnd.github+json',
+          Authorization: `Bearer ${accessToken}`,
+          'X-GitHub-Api-Version': '2026-03-10',
+          'User-Agent': 'Issuel',
+        },
+        signal: AbortSignal.timeout(10_000),
+        redirect: 'manual',
+        cache: 'no-store',
+      })
+      if (![301, 302, 307, 308].includes(response.status)) break
+      const location = response.headers.get('location')
+      if (!location || redirects >= 3) throw new Error('Invalid redirect')
+      url = new URL(location, url)
+      if (url.origin !== 'https://api.github.com' || url.username || url.password) {
+        throw new Error('Invalid redirect')
+      }
+    }
   } catch {
     throw new RepositoryError('github_unavailable', 503)
   }
@@ -72,6 +82,30 @@ async function github(path: string, accessToken: string) {
     throw new RepositoryError('github_invalid_response', 502)
   }
   return { data, link: response.headers.get('link') }
+}
+
+/** Resolve mutable repository names only against a fresh App-and-user access list. */
+export async function resolveWorkspace(
+  accessToken: string,
+  repositories: Awaited<ReturnType<typeof discoverRepositories>>['repositories'],
+  owner: string,
+  name: string,
+  repositoryId?: string,
+) {
+  // History identity survives renames and name reuse, but never grants access.
+  if (repositoryId !== undefined) {
+    return repositories.find(repository => String(repository.id) === repositoryId) ?? null
+  }
+  const fullName = `${owner}/${name}`.toLowerCase()
+  const repository = repositories.find(item => item.full_name.toLowerCase() === fullName)
+  if (repository) return repository
+  try {
+    const { data } = await github(`/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}`, accessToken)
+    return repositories.find(item => item.id === data.id) ?? null
+  } catch (error) {
+    if (error instanceof RepositoryError && error.status === 404) return null
+    throw error
+  }
 }
 
 /** Enumerate every installation and repository page; return no partial authorization list. */

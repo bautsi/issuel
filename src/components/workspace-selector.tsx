@@ -1,5 +1,7 @@
 import { useEffect, useState } from 'react'
+import { Link, Navigate, useLocation, useMatch, useNavigate } from 'react-router'
 import { Button } from '@/components/ui/button'
+import { Workspace } from '@/components/workspace'
 
 type Repository = {
   id: number
@@ -14,6 +16,14 @@ export function WorkspaceSelector({ userId, onSessionExpired }: {
   userId: string
   onSessionExpired: () => void
 }) {
+  const location = useLocation()
+  const navigate = useNavigate()
+  const match = useMatch('/workspace/:owner/:repo')
+  const owner = match?.params.owner
+  const name = match?.params.repo
+  const historyId = location.state?.userId === userId && Number.isSafeInteger(location.state?.repositoryId)
+    ? String(location.state.repositoryId) : undefined
+  const routeIdentity = JSON.stringify([location.pathname, historyId])
   const storageKey = `issuel:workspace:${userId}`
   const [preference] = useState(() => {
     try {
@@ -24,7 +34,9 @@ export function WorkspaceSelector({ userId, onSessionExpired }: {
   })
   const [{ id: selectedId, revoked }, setSelection] = useState({ id: preference.id, revoked: false })
   const [repositories, setRepositories] = useState<Repository[]>([])
-  const [loading, setLoading] = useState(true)
+  const [pending, setLoading] = useState(true)
+  const [loadedRoute, setLoadedRoute] = useState<string | null>(null)
+  const loading = pending || loadedRoute !== routeIdentity
   const [error, setError] = useState<string | null>(null)
   const [storageUnavailable, setStorageUnavailable] = useState(preference.unavailable)
   const [installationUrl, setInstallationUrl] = useState<string | null>(null)
@@ -44,14 +56,17 @@ export function WorkspaceSelector({ userId, onSessionExpired }: {
       setLoading(true)
       setError(null)
       try {
-        const response = await fetch('/api/repositories', { signal, cache: 'no-store' })
+        const path = owner && name
+          ? `/api/workspaces/${encodeURIComponent(owner)}/${encodeURIComponent(name)}${historyId ? `?repositoryId=${encodeURIComponent(historyId)}` : ''}`
+          : '/api/repositories'
+        const response = await fetch(path, { signal, cache: 'no-store' })
         const data = await response.json()
         if (signal.aborted) return
         if (response.status === 401) {
           onSessionExpired()
           return
         }
-        if (!response.ok) {
+        if (!response.ok && !(response.status === 404 && data.error === 'workspace_not_found')) {
           const messages: Record<string, string> = {
             github_forbidden: 'GitHub denied repository access. Check the App permissions and organization approval, then retry.',
             github_not_found: 'A GitHub installation is no longer accessible. Check App access, then retry.',
@@ -83,15 +98,25 @@ export function WorkspaceSelector({ userId, onSessionExpired }: {
           setOpen(true)
         }
         setSelection(current => {
-          const id = savedId ?? current.id
+          const id = owner && name ? data.repository ? String(data.repository.id) : null : savedId ?? current.id
           return id && !data.repositories.some((repository: Repository) => String(repository.id) === id)
             ? { id: null, revoked: true }
-            : { id, revoked: current.revoked }
+            : { id, revoked: !!(owner && name && !data.repository) || (!id && !!savedId) }
         })
+        if (owner && name && data.repository) {
+          try {
+            window.localStorage.setItem(storageKey, String(data.repository.id))
+          } catch {
+            setStorageUnavailable(true)
+          }
+        }
       } catch (failure) {
         if (!signal.aborted) setError(failure instanceof Error ? failure.message : 'Unable to load repositories. Please retry.')
       } finally {
-        if (!signal.aborted) setLoading(false)
+        if (!signal.aborted) {
+          setLoadedRoute(routeIdentity)
+          setLoading(false)
+        }
       }
     }
 
@@ -101,23 +126,19 @@ export function WorkspaceSelector({ userId, onSessionExpired }: {
       controller?.abort()
       window.removeEventListener('focus', loadRepositories)
     }
-  }, [userId, storageKey, revision, onSessionExpired])
+  }, [userId, storageKey, revision, onSessionExpired, owner, name, historyId, routeIdentity])
 
   const selected = !loading && !error ? repositories.find(repository => String(repository.id) === selectedId) : undefined
   const filtered = repositories.filter(repository => repository.full_name.toLowerCase().includes(search.trim().toLowerCase()))
 
-  /** Persist a choice from the fresh accessible list without changing the GitHub authorization. */
+  /** Navigate to an accessible repository; the server verifies it again before rendering. */
   function selectRepository(repository: Repository) {
     if (loading || error || !repositories.some(item => item.id === repository.id)) return
-    const id = String(repository.id)
-    setSelection({ id, revoked: false })
     setOpen(false)
     setSearch('')
-    try {
-      window.localStorage.setItem(storageKey, id)
-    } catch {
-      setStorageUnavailable(true)
-    }
+    navigate(`/workspace/${encodeURIComponent(repository.owner)}/${encodeURIComponent(repository.name)}`, {
+      state: { userId, repositoryId: repository.id },
+    })
   }
 
   /** Hide the old access list while requesting a complete fresh snapshot. */
@@ -132,12 +153,22 @@ export function WorkspaceSelector({ userId, onSessionExpired }: {
     setOpen(current => !current)
   }
 
+  const workspacePath = selected
+    ? `/workspace/${encodeURIComponent(selected.owner)}/${encodeURIComponent(selected.name)}` : null
+  if (selected && workspacePath && (location.pathname === '/' || (
+    match && (location.pathname !== workspacePath || historyId !== String(selected.id))
+  ))) {
+    return <Navigate to={workspacePath} replace state={{ userId, repositoryId: selected.id }} />
+  }
+
   return (
-    <section aria-labelledby="workspace-heading" aria-busy={loading} className="mt-6 max-w-xl rounded-xl border bg-card p-6 text-card-foreground shadow-sm sm:p-8">
+    <div className="grid min-h-[calc(100svh-5rem)] md:grid-cols-[20rem_1fr]">
+    {/* Workspace sidebar */}
+    <aside aria-labelledby="workspace-heading" aria-busy={loading} className="border-b bg-card p-6 text-card-foreground md:border-r md:border-b-0">
       {/* Current workspace */}
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0 flex-1">
-          <p className="text-xs font-medium tracking-widest text-muted-foreground">WORKSPACE</p>
+          <Link to="/" className="text-xs font-medium tracking-widest text-muted-foreground">WORKSPACE</Link>
           <h2 id="workspace-heading" className="mt-2 break-words text-lg font-semibold">
             {loading ? 'Loading repositories…' : error ? 'Workspace unavailable' : selected ? selected.name : 'Choose a repository'}
           </h2>
@@ -161,7 +192,7 @@ export function WorkspaceSelector({ userId, onSessionExpired }: {
         </div>
       )}
       {revoked && (
-        <p role="alert" className="mt-4 text-sm text-destructive">Repository access revoked or repository removed. Your previous workspace was cleared. Choose another repository.</p>
+        <p role="alert" className="mt-4 text-sm text-destructive">Repository unavailable or access revoked. Choose an accessible repository.</p>
       )}
       {storageUnavailable && (
         <p role="status" className="mt-4 text-sm text-muted-foreground">Browser storage is unavailable. Your choice works for this visit but may not be remembered.</p>
@@ -217,8 +248,20 @@ export function WorkspaceSelector({ userId, onSessionExpired }: {
         </div>
       )}
 
-      {/* Selected repository boundary */}
-      {selected && !open && <p role="status" className="mt-5 text-sm text-muted-foreground">Working in {selected.full_name}. Each repository is a separate workspace.</p>}
-    </section>
+    </aside>
+
+    {/* Protected workspace content */}
+    <main className="min-w-0 p-6 sm:p-10" aria-busy={loading}>
+      {loading ? <p role="status" className="text-sm text-muted-foreground">Verifying workspace access…</p>
+        : error ? <h1 className="text-xl font-semibold">Workspace unavailable</h1>
+        : location.pathname !== '/' && !match ? (
+          <div><h1 className="text-xl font-semibold">Page not found</h1><Link to="/" className="mt-4 inline-block underline">Choose a workspace</Link></div>
+        ) : selected && match ? <Workspace key={`${userId}:${selected.id}`} userId={userId} repository={selected} />
+        : <div>
+          <h1 className="text-xl font-semibold">{match ? 'Repository not found or not authorized' : 'Choose a repository'}</h1>
+          <p className="mt-3 text-sm text-muted-foreground">{match ? 'This workspace is unavailable to your GitHub account and App. Choose another repository or update App access.' : 'Select an accessible GitHub repository to open its workspace.'}</p>
+        </div>}
+    </main>
+    </div>
   )
 }

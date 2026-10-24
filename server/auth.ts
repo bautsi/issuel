@@ -5,7 +5,7 @@ import { DatabaseSync } from 'node:sqlite'
 import { Hono } from 'hono'
 import { deleteCookie, getCookie, setCookie } from 'hono/cookie'
 import type { Context } from 'hono'
-import { discoverRepositories, RepositoryError } from './repositories.ts'
+import { discoverRepositories, RepositoryError, resolveWorkspace } from './repositories.ts'
 
 const FLOW_TTL = 10 * 60_000
 const SESSION_TTL = 30 * 24 * 60 * 60_000
@@ -342,6 +342,7 @@ export function createAuth() {
     const authorization = new URL('https://github.com/login/oauth/authorize')
     authorization.search = new URLSearchParams({
       client_id: config.clientId, redirect_uri: config.callback.href, state,
+      prompt: 'select_account',
       scope: 'offline_access', code_challenge: hash(verifier), code_challenge_method: 'S256',
     }).toString()
     return c.redirect(authorization.href, 303)
@@ -397,7 +398,7 @@ export function createAuth() {
     }
   })
 
-  app.on('GET', ['/auth/session', '/repositories'], async (c) => {
+  app.on('GET', ['/auth/session', '/repositories', '/workspaces/:owner/:repo'], async (c) => {
     if (!config) throw new AuthError('auth_not_configured')
     const id = cookieId(c, sessionCookie)
     if (!id) {
@@ -414,9 +415,21 @@ export function createAuth() {
     }
     try {
       const token = await accessToken(session)
+      const owner = c.req.param('owner')
+      const repo = c.req.param('repo')
       let result
-      if (c.req.path.endsWith('/repositories')) {
-        result = { ...await discoverRepositories(token, config.clientId), userId: session.github_user_id }
+      let status: 200 | 404 = 200
+      if ((owner && repo) || c.req.path.endsWith('/repositories')) {
+        const discovery = await discoverRepositories(token, config.clientId)
+        result = { ...discovery, userId: session.github_user_id }
+        if (owner && repo) {
+          const repository = await resolveWorkspace(
+            token, discovery.repositories, owner, repo,
+            c.req.query('repositoryId'),
+          )
+          result = { ...result, repository, error: repository ? null : 'workspace_not_found' }
+          if (!repository) status = 404
+        }
       } else {
         const user = await githubUser(token)
         if (user.id !== session.github_user_id) throw new AuthError('reauthentication_required', 401)
@@ -426,7 +439,7 @@ export function createAuth() {
       if (!db().prepare('SELECT 1 FROM sessions WHERE id_hash = ? AND expires_at > ?').get(idHash, Date.now())) {
         throw new AuthError('unauthorized', 401)
       }
-      return c.json(result)
+      return c.json(result, status)
     } catch (error) {
       if ((error instanceof AuthError || error instanceof RepositoryError) && error.status === 401) {
         // An older request may receive 401 after another request has rotated its token.
