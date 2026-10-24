@@ -10,7 +10,7 @@
   "scripts": {
     "dev": "concurrently --kill-others --names web,api \"pnpm dev:web\" \"pnpm dev:api\"",
     "dev:web": "vite",
-    "dev:api": "node --watch server/index.ts",
+    "dev:api": "node --env-file=.env --input-type=module -e \"import { readConfig } from './server/auth.ts'; try { readConfig() } catch (error) { console.error(error.message); process.exit(1) }\" && node --env-file=.env --watch server/index.ts",
     "lint": "eslint . --max-warnings 0",
     "format": "prettier --write .",
     "format:check": "prettier --check .",

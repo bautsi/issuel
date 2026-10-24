@@ -12,6 +12,7 @@
     "noEmit": true,
     "verbatimModuleSyntax": true,
     "isolatedModules": true,
+    "rewriteRelativeImportExtensions": true,
     "noUnusedLocals": true,
     "noUnusedParameters": true,
     "noFallthroughCasesInSwitch": true

@@ -1,9 +1,11 @@
 import { serve } from '@hono/node-server'
 import { serveStatic } from '@hono/node-server/serve-static'
 import { Hono } from 'hono'
+import { createAuth } from './auth.ts'
 
 const app = new Hono()
 
+app.route('/api', createAuth())
 app.get('/api/health', (c) => c.json({ status: 'ok' }))
 app.all('/api/*', (c) => c.json({ error: 'Not found' }, 404))
 

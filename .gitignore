@@ -3,5 +3,11 @@ dist/
 *.tsbuildinfo
 .env
 .env.*
+!.env.example
 *.env
 *.local
+data/
+*.sqlite
+*.sqlite-*
+*.db
+*.db-*

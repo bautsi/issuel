@@ -1,33 +1,70 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Button } from '@/components/ui/button'
 
-/** Display the project foundation and check connectivity to the Hono API. */
+type User = { id: string; login: string; name: string | null }
+
+/** Restore the server session and offer GitHub authorization without browser tokens. */
 export default function App() {
-  const [status, setStatus] = useState<
-    'idle' | 'checking' | 'healthy' | 'error'
-  >('idle')
+  const [user, setUser] = useState<User | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [loggingOut, setLoggingOut] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [configured, setConfigured] = useState(true)
+  const [callbackError] = useState(() => new URL(window.location.href).searchParams.get('auth_error'))
 
-  /** Request the same-origin health endpoint and report its response. */
-  async function checkHealth() {
-    setStatus('checking')
+  useEffect(() => {
+    const controller = new AbortController()
+    const url = new URL(window.location.href)
+    if (callbackError) {
+      url.searchParams.delete('auth_error')
+      window.history.replaceState(null, '', `${url.pathname}${url.search}${url.hash}`)
+    }
 
-    try {
-      const response = await fetch('/api/health')
-      if (!response.ok) throw new Error('Health check failed')
-
-      const health: unknown = await response.json()
-      if (
-        typeof health !== 'object' ||
-        health === null ||
-        !('status' in health) ||
-        health.status !== 'ok'
-      ) {
-        throw new Error('Unexpected health response')
+    /** Recover identity from the HttpOnly cookie and display only safe error messages. */
+    async function restoreSession() {
+      try {
+        const response = await fetch('/api/auth/session', { signal: controller.signal, cache: 'no-store' })
+        if (response.status === 401) {
+          if (callbackError) setError('GitHub authorization was cancelled, expired, or unsuccessful. Please connect again.')
+          return
+        }
+        const data = await response.json()
+        if (!response.ok) {
+          if (data.error === 'auth_not_configured') {
+            setConfigured(false)
+            setError('GitHub authentication is not configured. Ask the server administrator to check the runtime settings in README.')
+            return
+          }
+          throw new Error('Session unavailable')
+        }
+        if (!data.user || typeof data.user.id !== 'string' || typeof data.user.login !== 'string') {
+          throw new Error('Invalid session response')
+        }
+        setUser(data.user)
+        if (callbackError) setError('GitHub authorization did not complete. Your previous session is still connected.')
+      } catch {
+        if (!controller.signal.aborted) setError('Unable to check your session. Please try again shortly.')
+      } finally {
+        if (!controller.signal.aborted) setLoading(false)
       }
+    }
 
-      setStatus('healthy')
+    void restoreSession()
+    return () => controller.abort()
+  }, [callbackError])
+
+  /** Invalidate the server session before clearing the displayed identity. */
+  async function logout() {
+    setLoggingOut(true)
+    setError(null)
+    try {
+      const response = await fetch('/api/auth/logout', { method: 'POST' })
+      if (!response.ok) throw new Error('Logout failed')
+      setUser(null)
     } catch {
-      setStatus('error')
+      setError('Unable to log out. Your session may still be active; please try again.')
+    } finally {
+      setLoggingOut(false)
     }
   }
 
@@ -59,11 +96,11 @@ export default function App() {
           <br />A little less issue.
         </h1>
         <p className="mt-6 max-w-lg text-base leading-7 text-muted-foreground">
-          The foundation for a simpler way to work with GitHub Issues. Your
-          workspace starts here.
+          A simpler way to work with GitHub Issues. Connect your GitHub account
+          to get started.
         </p>
 
-        {/* API connection */}
+        {/* GitHub authentication */}
         <section
           aria-labelledby="connection-heading"
           className="mt-12 max-w-xl rounded-xl border bg-card p-6 text-card-foreground shadow-sm sm:p-8"
@@ -71,38 +108,43 @@ export default function App() {
           <div className="flex items-center gap-3">
             <span
               aria-hidden="true"
-              className={`size-2 rounded-full ${status === 'healthy' ? 'bg-emerald-600' : status === 'error' ? 'bg-destructive' : 'bg-muted-foreground'}`}
+              className={`size-2 rounded-full ${user ? 'bg-emerald-600' : 'bg-muted-foreground'}`}
             />
             <h2 id="connection-heading" className="font-semibold">
-              Workspace connection
+              {user ? 'GitHub connected' : 'Connect your workspace'}
             </h2>
           </div>
           <p className="mt-3 text-sm leading-6 text-muted-foreground">
-            Check that your workspace can reach the server.
+            {user
+              ? `Signed in as ${user.name ? `${user.name} (@${user.login})` : `@${user.login}`}.`
+              : 'Sign in securely with your GitHub account.'}
           </p>
           <p
             role="status"
             aria-live="polite"
-            className={`mt-5 min-h-6 text-sm ${status === 'error' ? 'text-destructive' : 'text-muted-foreground'}`}
+            className="mt-5 min-h-6 text-sm text-muted-foreground"
           >
-            {status === 'idle' && 'Ready when you are.'}
-            {status === 'checking' && 'Checking connection…'}
-            {status === 'healthy' && 'Connected. Your workspace is ready.'}
-            {status === 'error' &&
-              'Unable to reach the server. Please try again.'}
+            {loading ? 'Checking your session…' : loggingOut ? 'Logging out…' : user ? 'Your session is securely stored on the server.' : 'Your GitHub tokens stay on the server.'}
           </p>
-          <Button
-            onClick={checkHealth}
-            disabled={status === 'checking'}
-            className="mt-5"
-            variant={status === 'healthy' ? 'outline' : 'default'}
-          >
-            {status === 'checking'
-              ? 'Checking…'
-              : status === 'healthy'
-                ? 'Check again'
-                : 'Check connection'}
-          </Button>
+
+          {/* Authentication errors */}
+          {error && <p role="alert" className="mt-3 text-sm text-destructive">{error}</p>}
+
+          {/* Authentication actions */}
+          <div className="mt-5 flex gap-3">
+            {user ? (
+              <Button onClick={logout} disabled={loading || loggingOut} variant="outline">
+                {loggingOut ? 'Logging out…' : 'Logout'}
+              </Button>
+            ) : (
+              <form method="post" action="/api/auth/login">
+                <Button type="submit" disabled={loading || !configured}>Connect GitHub</Button>
+              </form>
+            )}
+            {error && !loading && (
+              <Button variant="outline" onClick={() => window.location.reload()}>Try again</Button>
+            )}
+          </div>
         </section>
       </main>
 
