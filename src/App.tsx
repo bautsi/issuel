@@ -1,9 +1,10 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { Button } from '@/components/ui/button'
+import { WorkspaceSelector } from '@/components/workspace-selector'
 
 type User = { id: string; login: string; name: string | null }
 
-/** Restore the server session and offer GitHub authorization without browser tokens. */
+/** Restore the session and offer repository workspaces without browser credentials. */
 export default function App() {
   const [user, setUser] = useState<User | null>(null)
   const [loading, setLoading] = useState(true)
@@ -52,6 +53,12 @@ export default function App() {
     void restoreSession()
     return () => controller.abort()
   }, [callbackError])
+
+  /** Return to login when repository discovery detects an expired or revoked session. */
+  const handleSessionExpired = useCallback(() => {
+    setUser(null)
+    setError('Your GitHub session expired or was revoked. Connect GitHub again to continue.')
+  }, [])
 
   /** Invalidate the server session before clearing the displayed identity. */
   async function logout() {
@@ -146,6 +153,9 @@ export default function App() {
             )}
           </div>
         </section>
+
+        {/* Repository workspace */}
+        {user && <WorkspaceSelector key={user.id} userId={user.id} onSessionExpired={handleSessionExpired} />}
       </main>
 
       {/* Footer */}

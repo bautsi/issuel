@@ -5,6 +5,7 @@ import { DatabaseSync } from 'node:sqlite'
 import { Hono } from 'hono'
 import { deleteCookie, getCookie, setCookie } from 'hono/cookie'
 import type { Context } from 'hono'
+import { discoverRepositories, RepositoryError } from './repositories.ts'
 
 const FLOW_TTL = 10 * 60_000
 const SESSION_TTL = 30 * 24 * 60 * 60_000
@@ -181,7 +182,7 @@ async function githubUser(accessToken: string) {
   return { id: String(user.id), login: user.login, name: typeof user.name === 'string' ? user.name : null }
 }
 
-/** Mount authentication and API origin protection with one persistent SQLite connection. */
+/** Mount authentication, session-bound discovery and origin protection with one SQLite connection. */
 export function createAuth() {
   const app = new Hono()
   let config: Config | null = null
@@ -317,6 +318,10 @@ export function createAuth() {
   })
 
   app.onError((error, c) => {
+    if (error instanceof RepositoryError) {
+      if (error.retryAfter) c.header('Retry-After', String(error.retryAfter))
+      return c.json({ error: error.message, retryAfter: error.retryAfter }, error.status)
+    }
     const failure = error instanceof AuthError ? error : new AuthError('authentication_unavailable')
     if (failure.status === 503) c.header('Retry-After', '5')
     return c.json({ error: failure.message }, failure.status)
@@ -392,7 +397,8 @@ export function createAuth() {
     }
   })
 
-  app.get('/auth/session', async (c) => {
+  app.on('GET', ['/auth/session', '/repositories'], async (c) => {
+    if (!config) throw new AuthError('auth_not_configured')
     const id = cookieId(c, sessionCookie)
     if (!id) {
       clearCookie(c, sessionCookie)
@@ -407,15 +413,22 @@ export function createAuth() {
       return c.json({ error: 'unauthorized' }, 401)
     }
     try {
-      const user = await githubUser(await accessToken(session))
-      if (user.id !== session.github_user_id) throw new AuthError('reauthentication_required', 401)
+      const token = await accessToken(session)
+      let result
+      if (c.req.path.endsWith('/repositories')) {
+        result = { ...await discoverRepositories(token, config.clientId), userId: session.github_user_id }
+      } else {
+        const user = await githubUser(token)
+        if (user.id !== session.github_user_id) throw new AuthError('reauthentication_required', 401)
+        result = { user, expiresAt: session.expires_at }
+      }
       // Logout or expiry during an upstream request must not restore a session in the response.
       if (!db().prepare('SELECT 1 FROM sessions WHERE id_hash = ? AND expires_at > ?').get(idHash, Date.now())) {
         throw new AuthError('unauthorized', 401)
       }
-      return c.json({ user, expiresAt: session.expires_at })
+      return c.json(result)
     } catch (error) {
-      if (error instanceof AuthError && error.status === 401) {
+      if ((error instanceof AuthError || error instanceof RepositoryError) && error.status === 401) {
         // An older request may receive 401 after another request has rotated its token.
         const removed = db().prepare(`DELETE FROM sessions
           WHERE id_hash = ? AND access_token = ? AND refresh_started_at IS NULL`)

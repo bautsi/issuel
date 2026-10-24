@@ -122,6 +122,7 @@ In development, supply backend settings through `.env`; in production, use proce
 | Variable | Required / default | Purpose |
 | --- | --- | --- |
 | `GITHUB_APP_CLIENT_ID` | Required | GitHub App Client ID, not App ID |
+| `GITHUB_APP_SLUG` | Required for an installation link before the user's first installation | Public URL name from `https://github.com/apps/<slug>`; verified against `GITHUB_APP_CLIENT_ID` |
 | `GITHUB_APP_CLIENT_SECRET` | Required | GitHub App Client secret |
 | `GITHUB_OAUTH_CALLBACK_URL` | Required | Exact `/api/auth/callback` URL on the browser-facing origin; no query, fragment or URL credentials |
 | `SESSION_ENCRYPTION_KEY` | Required | 32 random bytes encoded as exactly 64 hexadecimal characters; retain across restarts |
@@ -183,4 +184,48 @@ Real OAuth end-to-end and refresh-rotation verification requires an actual GitHu
 5. After the real access-token expiration window, access the session concurrently, confirm rotation persists, then reload/restart. Test a revoked GitHub authorization separately.
 6. Logout, reload, and confirm `/api/auth/session` returns 401. Unset runtime configuration in an isolated process; confirm auth returns sanitized 503 while `/api/health` and the SPA remain available.
 
-Repository discovery, issue operations, testing frameworks, Docker, and CI/CD remain outside this phase.
+Issue operations, testing frameworks, Docker, and CI/CD remain outside this phase.
+
+## Repository workspaces (ISL-3)
+
+After login, choose a repository in **Choose a repository**. Search by owner/name, select a workspace, or use **Switch workspace**. Private/public visibility is displayed for each repository. Each repository is an independent workspace; this phase does not fetch issues, comments or labels.
+
+`GET /api/repositories` uses the current server-side session and its GitHub App user access token. It fetches every page of `GET /user/installations` and `GET /user/installations/{installation_id}/repositories` with `per_page=100`, following the presence of `rel="next"` in Link headers. It excludes suspended installations, deduplicates by stable numeric repository ID, and returns only repository ID, name, full_name, owner login, visibility, repository permissions and installation IDs/permissions. It never falls back to `/user/repos` or includes upstream credential fields. Repository permissions describe the user's access; installation permissions describe the App's grant, and neither alone authorizes a future operation.
+
+GitHub documents no additional permissions for listing user installations, and **Metadata: read** repository permission for listing their repositories. Both use GitHub App user access tokens, including for private repositories. See the [installation API reference](https://docs.github.com/en/rest/apps/installations#list-repositories-accessible-to-the-user-access-token) and [pagination reference](https://docs.github.com/en/rest/using-the-rest-api/using-pagination-in-the-rest-api).
+
+The endpoint returns `401` for missing/expired sessions or revoked authentication, `403 github_forbidden` for denied access, `404 github_not_found` for an inaccessible installation, `429 github_rate_limited` with a safe `retryAfter` value and `Retry-After` header for primary/secondary limits, and `502/503` for malformed responses or provider/service failures. An installation failure rejects the entire discovery rather than presenting a partial list as complete. Responses use `Cache-Control: no-store`; transient errors retain the last preference but hide the unverified workspace and picker until retry succeeds.
+
+Only the selected repository ID is saved under `issuel:workspace:<github-user-id>` in localStorage. Logout preserves this preference for the next login. Every mount, retry, switch-picker opening and window focus reloads access from the server. A successful discovery that no longer contains the saved ID clears it and displays the access-revoked state. Browser storage failures leave selection usable for the current visit with a warning. This is a preference, never an authorization record: future repository-specific endpoints must freshly verify the session user's access before reading or writing repository data.
+
+### GitHub App installation link
+
+GitHub sign-in authorizes the App to act for the user; it does **not** install the App on an account or grant it access to that account's repositories. Configuring `GITHUB_APP_SLUG` enables an installation link; it does **not** grant repository access either.
+
+For users with an installation, GitHub's `app_slug` determines the installation link. For a user with **zero installations**, set the public server runtime variable **`GITHUB_APP_SLUG`** to the URL-friendly name shown in the App's GitHub settings/public-page URL. No new secret is required. Before offering this configured link, the server calls `GET /apps/{app_slug}` and checks that its `client_id` matches the existing `GITHUB_APP_CLIENT_ID`; a mismatch, missing setting, invalid slug or lookup failure never produces a guessed link. Runtime configuration is read by the backend only; no environment files are changed by this feature.
+
+The installation URL follows GitHub's documented `https://github.com/apps/APP-NAME/installations/new` form. See [Get an app](https://docs.github.com/en/rest/apps/apps#get-an-app) and [sharing an installation link](https://docs.github.com/en/apps/sharing-github-apps/sharing-your-github-app#sharing-your-github-app-via-an-install-link). Private Apps and organization policies may require their owner or an organization administrator to install/approve access. The link opens in another tab; return to Issuel or click **Refresh repositories** after installation.
+
+### First repository setup and empty-list troubleshooting
+
+1. As the App owner, open the owning personal account or organization's **Settings → Developer settings → GitHub Apps**, edit the same App used by `GITHUB_APP_CLIENT_ID`, and choose **Install App**. App users can instead use Issuel's installation link or request one from the App owner. See GitHub's [installation instructions](https://docs.github.com/en/apps/using-github-apps/installing-your-own-github-app).
+2. Install on the account that **owns the repository**. Select **Only select repositories** and add the repositories you want to use, or choose **All repositories** if that scope is intended. Complete installation or obtain organization approval. The signed-in user must also have access to those repositories.
+3. If already installed, open **Configure → Repository access**, add the missing repositories and save. Personal installations are under **Settings → Applications → Installed GitHub Apps**; organization installations are under **Organization Settings → GitHub Apps**. Confirm the installation is not suspended. See [modifying installed Apps](https://docs.github.com/en/apps/using-github-apps/reviewing-and-modifying-installed-github-apps).
+4. Set `GITHUB_APP_SLUG` in the backend runtime settings to the final segment of this App's public-page URL (for example, `my-app` from `https://github.com/apps/my-app`). Restart the API; when using `pnpm dev`, stop and restart it after changing runtime settings. This setting is public metadata, not the Client ID, display name, Client secret or private key.
+5. Return to Issuel and click **Refresh repositories**, then select a workspace. Updating installation access does not require logging out or repeating OAuth.
+
+If `/api/repositories` succeeds with `repositories: []`, `installationUrl: null` and `installationNotice: "app_slug_not_configured"`, GitHub returned no installations visible to the current user token, and the server could not produce a verified installation link. Check installation and repository access first, then check that `GITHUB_APP_SLUG` is present, valid and belongs to the configured Client ID. The notice does not by itself indicate a bad Client secret or failed sign-in. If installation is complete but the list remains empty, verify that it is the same GitHub App used for login and that the signed-in user can access the selected repositories.
+
+### Browser acceptance checks
+
+Use an already configured running server and an actual GitHub App session:
+
+1. Login and inspect `/api/repositories` in DevTools. Compare the list against this App's granted repositories across personal and organization installations, including a private repository. Confirm an accessible repository outside the App grant is absent. Inspect responses/storage for absence of GitHub tokens.
+2. Search by repository name/owner, select A, then switch to B. Confirm owner and visibility labels, and confirm no OAuth redirect occurs when switching.
+3. Reload, then logout/login as the same user: B should restore after fresh discovery. Login as another GitHub user: preferences must remain separate. With localStorage disabled, verify selection works and a storage warning appears.
+4. Remove B from the App's grant (or revoke the user's repository access), then return to Issuel/reload. Confirm B disappears, its saved preference is cleared after successful discovery, and the revoked message asks for another choice. A temporary GitHub failure must hide the workspace without erasing its preference.
+5. With zero installations, verify the empty state and the installation link for the configured App. Complete installation in the new tab, return, and refresh. An incorrect `GITHUB_APP_SLUG` must not link to another App.
+6. Logout, then open `/api/repositories`: expect 401. With the page open, expire/remove the Issuel session or revoke GitHub authorization, then focus/retry discovery: expect the login prompt with a session-expired message. Inspect denied/removed installation and rate-limit responses where reproducible; retry only after the indicated delay.
+7. With accounts exceeding 100 installations or 100 repositories in one installation, confirm later pages appear. Without such real accounts, pagination can only be checked using a local mock; do not treat that as live GitHub acceptance.
+
+Access changes are discovered on a fresh request, not pushed by webhook. There is no periodic background polling, permanent repository cache, workspace database table, or repository-specific data endpoint in this phase.
