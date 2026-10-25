@@ -1,6 +1,14 @@
 import { useEffect, useState } from 'react'
-import { Link, Navigate, useLocation, useMatch, useNavigate } from 'react-router'
+import { useTranslation } from 'react-i18next'
+import {
+  Link,
+  Navigate,
+  useLocation,
+  useMatch,
+  useNavigate,
+} from 'react-router'
 import { Button } from '@/components/ui/button'
+import { Skeleton } from '@/components/ui/skeleton'
 import { Workspace } from '@/components/workspace'
 
 type Repository = {
@@ -11,18 +19,25 @@ type Repository = {
   private: boolean
 }
 
-/** Select one server-verified repository and retain only its ID for this GitHub user. */
-export function WorkspaceSelector({ userId, onSessionExpired }: {
+/** Translate discovery and navigation without restarting repository verification on language changes. */
+export function WorkspaceSelector({
+  userId,
+  onSessionExpired,
+}: {
   userId: string
   onSessionExpired: () => void
 }) {
+  const { t } = useTranslation()
   const location = useLocation()
   const navigate = useNavigate()
   const match = useMatch('/workspace/:owner/:repo')
   const owner = match?.params.owner
   const name = match?.params.repo
-  const historyId = location.state?.userId === userId && Number.isSafeInteger(location.state?.repositoryId)
-    ? String(location.state.repositoryId) : undefined
+  const historyId =
+    location.state?.userId === userId &&
+    Number.isSafeInteger(location.state?.repositoryId)
+      ? String(location.state.repositoryId)
+      : undefined
   const routeIdentity = JSON.stringify([location.pathname, historyId])
   const storageKey = `issuel:workspace:${userId}`
   const [preference] = useState(() => {
@@ -32,23 +47,29 @@ export function WorkspaceSelector({ userId, onSessionExpired }: {
       return { id: null, unavailable: true }
     }
   })
-  const [{ id: selectedId, revoked }, setSelection] = useState({ id: preference.id, revoked: false })
+  const [{ id: selectedId, revoked }, setSelection] = useState({
+    id: preference.id,
+    revoked: false,
+  })
   const [repositories, setRepositories] = useState<Repository[]>([])
   const [pending, setLoading] = useState(true)
   const [loadedRoute, setLoadedRoute] = useState<string | null>(null)
   const loading = pending || loadedRoute !== routeIdentity
   const [error, setError] = useState<string | null>(null)
-  const [storageUnavailable, setStorageUnavailable] = useState(preference.unavailable)
+  const [storageUnavailable, setStorageUnavailable] = useState(
+    preference.unavailable,
+  )
   const [installationUrl, setInstallationUrl] = useState<string | null>(null)
-  const [installationNotice, setInstallationNotice] = useState<string | null>(null)
-  const [open, setOpen] = useState(!preference.id)
+  const [installationNotice, setInstallationNotice] = useState<string | null>(
+    null,
+  )
   const [search, setSearch] = useState('')
   const [revision, setRevision] = useState(0)
 
   useEffect(() => {
     let controller: AbortController | undefined
 
-    /** Recheck current access on mount, retry and return from GitHub; discard older requests. */
+    /** Recheck access on navigation and explicit refresh; discard older requests. */
     async function loadRepositories() {
       controller?.abort()
       controller = new AbortController()
@@ -56,9 +77,10 @@ export function WorkspaceSelector({ userId, onSessionExpired }: {
       setLoading(true)
       setError(null)
       try {
-        const path = owner && name
-          ? `/api/workspaces/${encodeURIComponent(owner)}/${encodeURIComponent(name)}${historyId ? `?repositoryId=${encodeURIComponent(historyId)}` : ''}`
-          : '/api/repositories'
+        const path =
+          owner && name
+            ? `/api/workspaces/${encodeURIComponent(owner)}/${encodeURIComponent(name)}${historyId ? `?repositoryId=${encodeURIComponent(historyId)}` : ''}`
+            : '/api/repositories'
         const response = await fetch(path, { signal, cache: 'no-store' })
         const data = await response.json()
         if (signal.aborted) return
@@ -66,18 +88,31 @@ export function WorkspaceSelector({ userId, onSessionExpired }: {
           onSessionExpired()
           return
         }
-        if (!response.ok && !(response.status === 404 && data.error === 'workspace_not_found')) {
+        if (
+          !response.ok &&
+          !(response.status === 404 && data.error === 'workspace_not_found')
+        ) {
           const messages: Record<string, string> = {
-            github_forbidden: 'GitHub denied repository access. Check the App permissions and organization approval, then retry.',
-            github_not_found: 'A GitHub installation is no longer accessible. Check App access, then retry.',
-            github_rate_limited: `GitHub rate limit reached. Retry after ${Number.isSafeInteger(data.retryAfter) ? data.retryAfter : 60} seconds.`,
-            auth_not_configured: 'GitHub authentication is not configured on the server.',
-            refresh_in_progress: 'Your session is being refreshed. Please retry shortly.',
+            github_forbidden:
+              'GitHub denied repository access. Check the App permissions and organization approval, then retry.',
+            github_not_found:
+              'A GitHub installation is no longer accessible. Check App access, then retry.',
+            github_rate_limited:
+              'GitHub rate limit reached. Please wait before retrying.',
+            auth_not_configured:
+              'GitHub authentication is not configured on the server.',
+            refresh_in_progress:
+              'Your session is being refreshed. Please retry shortly.',
           }
-          throw new Error(messages[data.error] ?? 'Unable to load repositories from GitHub. Please retry shortly.')
+          throw new Error(
+            messages[data.error] ??
+              'Unable to load repositories from GitHub. Please retry shortly.',
+          )
         }
         if (data.userId !== userId || !Array.isArray(data.repositories)) {
-          throw new Error('Your GitHub session changed. Reload the page to continue.')
+          throw new Error(
+            'Your GitHub session changed. Reload the page to continue.',
+          )
         }
         setRepositories(data.repositories)
         setInstallationUrl(data.installationUrl)
@@ -89,19 +124,35 @@ export function WorkspaceSelector({ userId, onSessionExpired }: {
         } catch {
           setStorageUnavailable(true)
         }
-        if (savedId && !data.repositories.some((repository: Repository) => String(repository.id) === savedId)) {
+        if (
+          savedId &&
+          !data.repositories.some(
+            (repository: Repository) => String(repository.id) === savedId,
+          )
+        ) {
           try {
             window.localStorage.removeItem(storageKey)
           } catch {
             setStorageUnavailable(true)
           }
-          setOpen(true)
         }
-        setSelection(current => {
-          const id = owner && name ? data.repository ? String(data.repository.id) : null : savedId ?? current.id
-          return id && !data.repositories.some((repository: Repository) => String(repository.id) === id)
+        setSelection((current) => {
+          const id =
+            owner && name
+              ? data.repository
+                ? String(data.repository.id)
+                : null
+              : (savedId ?? current.id)
+          return id &&
+            !data.repositories.some(
+              (repository: Repository) => String(repository.id) === id,
+            )
             ? { id: null, revoked: true }
-            : { id, revoked: !!(owner && name && !data.repository) || (!id && !!savedId) }
+            : {
+                id,
+                revoked:
+                  !!(owner && name && !data.repository) || (!id && !!savedId),
+              }
         })
         if (owner && name && data.repository) {
           try {
@@ -111,7 +162,12 @@ export function WorkspaceSelector({ userId, onSessionExpired }: {
           }
         }
       } catch (failure) {
-        if (!signal.aborted) setError(failure instanceof Error ? failure.message : 'Unable to load repositories. Please retry.')
+        if (!signal.aborted)
+          setError(
+            failure instanceof Error
+              ? failure.message
+              : 'Unable to load repositories. Please retry.',
+          )
       } finally {
         if (!signal.aborted) {
           setLoadedRoute(routeIdentity)
@@ -121,147 +177,361 @@ export function WorkspaceSelector({ userId, onSessionExpired }: {
     }
 
     void loadRepositories()
-    window.addEventListener('focus', loadRepositories)
     return () => {
       controller?.abort()
-      window.removeEventListener('focus', loadRepositories)
     }
-  }, [userId, storageKey, revision, onSessionExpired, owner, name, historyId, routeIdentity])
+  }, [
+    userId,
+    storageKey,
+    revision,
+    onSessionExpired,
+    owner,
+    name,
+    historyId,
+    routeIdentity,
+  ])
 
-  const selected = !loading && !error ? repositories.find(repository => String(repository.id) === selectedId) : undefined
-  const filtered = repositories.filter(repository => repository.full_name.toLowerCase().includes(search.trim().toLowerCase()))
+  const selected =
+    !loading && !error
+      ? repositories.find((repository) => String(repository.id) === selectedId)
+      : undefined
+  const filtered = repositories.filter((repository) =>
+    repository.full_name.toLowerCase().includes(search.trim().toLowerCase()),
+  )
 
   /** Navigate to an accessible repository; the server verifies it again before rendering. */
   function selectRepository(repository: Repository) {
-    if (loading || error || !repositories.some(item => item.id === repository.id)) return
-    setOpen(false)
+    if (
+      loading ||
+      error ||
+      !repositories.some((item) => item.id === repository.id)
+    )
+      return
     setSearch('')
-    navigate(`/workspace/${encodeURIComponent(repository.owner)}/${encodeURIComponent(repository.name)}`, {
-      state: { userId, repositoryId: repository.id },
-    })
+    navigate(
+      `/workspace/${encodeURIComponent(repository.owner)}/${encodeURIComponent(repository.name)}`,
+      {
+        state: { userId, repositoryId: repository.id },
+      },
+    )
   }
 
   /** Hide the old access list while requesting a complete fresh snapshot. */
   function refreshRepositories() {
     setLoading(true)
-    setRevision(current => current + 1)
-  }
-
-  /** Open the picker and refresh GitHub access before another workspace can be selected. */
-  function toggleSelector() {
-    if (!open) refreshRepositories()
-    setOpen(current => !current)
+    setRevision((current) => current + 1)
   }
 
   const workspacePath = selected
-    ? `/workspace/${encodeURIComponent(selected.owner)}/${encodeURIComponent(selected.name)}` : null
-  if (selected && workspacePath && (location.pathname === '/' || (
-    match && (location.pathname !== workspacePath || historyId !== String(selected.id))
-  ))) {
-    return <Navigate to={workspacePath} replace state={{ userId, repositoryId: selected.id }} />
+    ? `/workspace/${encodeURIComponent(selected.owner)}/${encodeURIComponent(selected.name)}`
+    : null
+  if (
+    selected &&
+    workspacePath &&
+    (location.pathname === '/' ||
+      (match &&
+        (location.pathname !== workspacePath ||
+          historyId !== String(selected.id))))
+  ) {
+    return (
+      <Navigate
+        to={workspacePath}
+        replace
+        state={{ userId, repositoryId: selected.id }}
+      />
+    )
   }
 
   return (
-    <div className="grid min-h-[calc(100svh-5rem)] md:grid-cols-[20rem_1fr]">
-    {/* Workspace sidebar */}
-    <aside aria-labelledby="workspace-heading" aria-busy={loading} className="border-b bg-card p-6 text-card-foreground md:border-r md:border-b-0">
-      {/* Current workspace */}
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div className="min-w-0 flex-1">
-          <Link to="/" className="text-xs font-medium tracking-widest text-muted-foreground">WORKSPACE</Link>
-          <h2 id="workspace-heading" className="mt-2 break-words text-lg font-semibold">
-            {loading ? 'Loading repositories…' : error ? 'Workspace unavailable' : selected ? selected.name : 'Choose a repository'}
+    <div className="grid min-h-[calc(100svh-3.5rem)] md:grid-cols-[13.5rem_minmax(0,1fr)]">
+      {/* Persistent repository navigation */}
+      <aside
+        aria-labelledby="workspace-heading"
+        aria-busy={loading}
+        className="flex min-w-0 flex-col border-b bg-card/40 p-3 md:sticky md:top-14 md:h-[calc(100svh-3.5rem)] md:border-r md:border-b-0"
+      >
+        <div className="flex items-center justify-between px-2">
+          <h2
+            id="workspace-heading"
+            className="text-xs font-medium text-muted-foreground"
+          >
+            {t('Repositories')}
           </h2>
-          {selected && (
-            <p className="mt-1 break-words text-sm text-muted-foreground">
-              {selected.owner} <span className="ml-2 rounded border px-1.5 py-0.5 text-xs">{selected.private ? 'Private' : 'Public'}</span>
-            </p>
-          )}
+          <Button
+            variant="outline"
+            aria-label={t('Refresh repositories')}
+            title={t('Refresh repositories')}
+            onClick={refreshRepositories}
+            disabled={loading}
+            className="size-7 border-transparent bg-transparent p-0 text-muted-foreground shadow-none"
+          >
+            <svg
+              aria-hidden="true"
+              className="size-3.5"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.8"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            >
+              <path d="M20 7v5h-5M4 17v-5h5" />
+              <path d="M6.1 7a7 7 0 0 1 11.6-1L20 9M4 15l2.3 3A7 7 0 0 0 17.9 17" />
+            </svg>
+          </Button>
         </div>
-        <Button variant="outline" onClick={toggleSelector} disabled={loading || !!error} aria-expanded={open || !selected} aria-controls="repository-picker">
-          {selected ? open ? 'Close' : 'Switch workspace' : 'Select repository'}
-        </Button>
-      </div>
 
-      {/* Discovery and access states */}
-      {loading && <p role="status" className="mt-4 text-sm text-muted-foreground">Checking repositories you can access through this GitHub App…</p>}
-      {error && (
-        <div className="mt-4">
-          <p role="alert" className="text-sm text-destructive">{error}</p>
-          <Button className="mt-3" variant="outline" onClick={refreshRepositories}>Retry</Button>
-        </div>
-      )}
-      {revoked && (
-        <p role="alert" className="mt-4 text-sm text-destructive">Repository unavailable or access revoked. Choose an accessible repository.</p>
-      )}
-      {storageUnavailable && (
-        <p role="status" className="mt-4 text-sm text-muted-foreground">Browser storage is unavailable. Your choice works for this visit but may not be remembered.</p>
-      )}
-
-      {/* Repository picker */}
-      {!loading && !error && (open || !selected) && (
-        <div id="repository-picker" className="mt-5 border-t pt-5">
-          {repositories.length === 0 ? (
-            <div>
-              <p className="font-medium">No accessible repositories</p>
-              <p className="mt-2 text-sm leading-6 text-muted-foreground">You are signed in to GitHub. To use a repository, this GitHub App must also be installed on the account that owns it and granted access to it.</p>
-              <ol className="mt-3 list-decimal space-y-2 pl-5 text-sm leading-6 text-muted-foreground">
-                <li>Use the installation link below, or ask the App owner for one.</li>
-                <li>Choose the personal or organization account that owns your repository, then select the repositories to allow. If already installed, use Configure to update Repository access.</li>
-                <li>Return here and select Refresh repositories. Organization access may require an administrator’s approval.</li>
-              </ol>
+        {/* Loading, discovery errors and access changes */}
+        {loading && repositories.length === 0 && (
+          <div role="status" className="mt-3 flex min-h-0 flex-1 flex-col">
+            <span className="sr-only">{t('Loading repositories…')}</span>
+            <Skeleton className="mx-1 h-8 shrink-0" />
+            <div className="mt-2 space-y-0.5">
+              {[0, 1, 2, 3].map((row) => (
+                <div
+                  key={row}
+                  className="flex min-h-11 items-center gap-2.5 border border-transparent px-2 py-2"
+                >
+                  <Skeleton className="size-4 shrink-0" />
+                  <div className="min-w-0 flex-1">
+                    <div className="flex h-4 items-center">
+                      <Skeleton className="h-3 w-3/4" />
+                    </div>
+                    <div className="flex h-4 items-center">
+                      <Skeleton className="h-2.5 w-1/2" />
+                    </div>
+                  </div>
+                </div>
+              ))}
             </div>
-          ) : (
-            <>
-              <label htmlFor="repository-search" className="text-sm font-medium">Search repositories</label>
-              <input id="repository-search" type="search" value={search} onChange={event => setSearch(event.target.value)} placeholder="Search owner or repository name…" className="mt-2 h-10 w-full rounded-md border border-input bg-background px-3 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring" />
-              <ul aria-label="Accessible repositories" className="mt-3 max-h-72 space-y-1 overflow-y-auto">
-                {filtered.map(repository => (
+          </div>
+        )}
+        {error && (
+          <div className="mt-3 px-2">
+            <p role="alert" className="text-xs leading-5 text-destructive">
+              {t(error)}
+            </p>
+            <Button
+              className="mt-3 h-8 text-xs"
+              variant="outline"
+              onClick={refreshRepositories}
+            >
+              {t('Retry')}
+            </Button>
+          </div>
+        )}
+        {revoked && !loading && (
+          <p
+            role="alert"
+            className="mt-3 px-2 text-xs leading-5 text-destructive"
+          >
+            {t(
+              'Repository unavailable or access revoked. Choose another repository.',
+            )}
+          </p>
+        )}
+
+        {/* Available repositories are always one click away */}
+        {!error && repositories.length > 0 && (
+          <nav
+            aria-label={t('Repository workspaces')}
+            className="mt-3 flex min-h-0 flex-1 flex-col"
+          >
+            <label htmlFor="repository-search" className="sr-only">
+              {t('Search repositories')}
+            </label>
+            <input
+              id="repository-search"
+              type="search"
+              value={search}
+              onChange={(event) => setSearch(event.target.value)}
+              placeholder={t('Find a repository…')}
+              className="mx-1 h-8 min-h-8 rounded-md border bg-background/60 px-2.5 text-xs outline-none placeholder:text-muted-foreground focus-visible:ring-2 focus-visible:ring-ring"
+            />
+            <ul className="mt-2 max-h-64 space-y-0.5 overflow-y-auto md:max-h-none">
+              {filtered.map((repository) => {
+                const active =
+                  String(repository.id) === (historyId ?? selectedId)
+                return (
                   <li key={repository.id}>
-                    <Button variant="outline" onClick={() => selectRepository(repository)} aria-pressed={String(repository.id) === selectedId} className="h-auto min-h-14 w-full justify-start gap-3 border-transparent px-3 text-left shadow-none">
+                    <Button
+                      variant="outline"
+                      onClick={() => selectRepository(repository)}
+                      disabled={loading}
+                      aria-current={active ? 'page' : undefined}
+                      title={repository.full_name}
+                      className={`h-auto min-h-11 w-full justify-start gap-2.5 border-transparent px-2 py-2 text-left shadow-none ${active ? 'bg-accent' : 'bg-transparent'}`}
+                    >
+                      <svg
+                        aria-hidden="true"
+                        className="size-4 shrink-0 text-muted-foreground"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="1.6"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                      >
+                        <path d="M4 19V5a2 2 0 0 1 2-2h14v18H6a2 2 0 0 1 0-4h14M8 3v14" />
+                      </svg>
                       <span className="min-w-0 flex-1">
-                        <span className="block truncate font-medium">{repository.name}</span>
-                        <span className="block truncate text-xs font-normal text-muted-foreground">{repository.owner}</span>
+                        <span className="block truncate text-xs font-medium">
+                          {repository.name}
+                        </span>
+                        <span className="block truncate text-[11px] font-normal text-muted-foreground">
+                          {repository.owner}
+                        </span>
                       </span>
-                      <span className="rounded border px-1.5 py-0.5 text-xs font-normal text-muted-foreground">{repository.private ? 'Private' : 'Public'}</span>
-                      <span className="w-4" aria-hidden="true">{String(repository.id) === selectedId ? '✓' : ''}</span>
+                      {repository.private && (
+                        <span
+                          className="text-muted-foreground"
+                          title={t('Private repository')}
+                        >
+                          <span className="sr-only">
+                            {t('Private repository')}
+                          </span>
+                          <svg
+                            aria-hidden="true"
+                            className="size-3"
+                            viewBox="0 0 24 24"
+                            fill="none"
+                            stroke="currentColor"
+                            strokeWidth="1.8"
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                          >
+                            <rect x="5" y="10" width="14" height="11" rx="2" />
+                            <path d="M8 10V7a4 4 0 0 1 8 0v3" />
+                          </svg>
+                        </span>
+                      )}
                     </Button>
                   </li>
-                ))}
-              </ul>
-              {filtered.length === 0 && <p role="status" className="mt-3 text-sm text-muted-foreground">No repositories match your search.</p>}
-            </>
-          )}
-
-          {/* GitHub installation actions */}
-          <div className="mt-5 flex flex-wrap items-center gap-3">
-            {installationUrl && <a href={installationUrl} target="_blank" rel="noreferrer" className="text-sm font-medium underline underline-offset-4">Install GitHub App / add repositories ↗</a>}
-            <Button variant="outline" onClick={refreshRepositories}>Refresh repositories</Button>
+                )
+              })}
+            </ul>
+            {filtered.length === 0 && (
+              <p
+                role="status"
+                className="px-2 py-4 text-xs text-muted-foreground"
+              >
+                {t('No matching repositories.')}
+              </p>
+            )}
+          </nav>
+        )}
+        {!loading && !error && repositories.length === 0 && (
+          <div className="mt-4 px-2 text-xs leading-5">
+            <p className="font-medium">{t('No repositories yet')}</p>
+            <p className="mt-2 text-muted-foreground">
+              {t(
+                'Install the GitHub App and grant repository access, then refresh this list.',
+              )}
+            </p>
           </div>
-          {!installationUrl && (
-            <p className="mt-3 text-xs leading-5 text-muted-foreground">
-              {installationNotice === 'installation_lookup_unavailable'
-                ? 'The App installation link is temporarily unavailable. Retry shortly.'
-                : 'The installation link is not configured or could not be verified. Ask the App owner for it, or ask the server administrator to check the App settings. App owners can open the App’s GitHub settings and choose Install App.'}
+        )}
+
+        {/* Repository access setup and local preference notices */}
+        <div className="mt-4 space-y-3 border-t px-2 pt-3 md:mt-auto">
+          {storageUnavailable && (
+            <p
+              role="status"
+              className="text-xs leading-5 text-muted-foreground"
+            >
+              {t(
+                'Browser storage is unavailable. Your workspace choice will only be kept for this visit.',
+              )}
             </p>
           )}
+          {installationUrl && (
+            <a
+              href={installationUrl}
+              target="_blank"
+              rel="noreferrer"
+              className="inline-block text-xs text-muted-foreground transition-colors hover:text-foreground"
+            >
+              {t('Add repositories ↗')}
+            </a>
+          )}
+          {!loading &&
+            !error &&
+            !installationUrl &&
+            repositories.length === 0 && (
+              <p className="text-xs leading-5 text-muted-foreground">
+                {t(
+                  installationNotice === 'installation_lookup_unavailable'
+                    ? 'The installation link is temporarily unavailable. Refresh to retry.'
+                    : 'Ask the App owner for an installation link.',
+                )}
+              </p>
+            )}
         </div>
-      )}
+      </aside>
 
-    </aside>
+      {/* Verify access before displaying repository content */}
+      <main className="min-w-0 p-5 sm:p-6 lg:p-8" aria-busy={loading}>
+        {loading ? (
+          <div role="status">
+            <span className="sr-only">{t('Loading workspace…')}</span>
+            <div aria-hidden="true">
+              <Skeleton className="h-4 w-44" />
+              <Skeleton className="mt-3 h-8 w-56 max-w-full" />
+              <Skeleton className="mt-3 h-5 w-48" />
 
-    {/* Protected workspace content */}
-    <main className="min-w-0 p-6 sm:p-10" aria-busy={loading}>
-      {loading ? <p role="status" className="text-sm text-muted-foreground">Verifying workspace access…</p>
-        : error ? <h1 className="text-xl font-semibold">Workspace unavailable</h1>
-        : location.pathname !== '/' && !match ? (
-          <div><h1 className="text-xl font-semibold">Page not found</h1><Link to="/" className="mt-4 inline-block underline">Choose a workspace</Link></div>
-        ) : selected && match ? <Workspace key={`${userId}:${selected.id}`} userId={userId} repository={selected} />
-        : <div>
-          <h1 className="text-xl font-semibold">{match ? 'Repository not found or not authorized' : 'Choose a repository'}</h1>
-          <p className="mt-3 text-sm text-muted-foreground">{match ? 'This workspace is unavailable to your GitHub account and App. Choose another repository or update App access.' : 'Select an accessible GitHub repository to open its workspace.'}</p>
-        </div>}
-    </main>
+              {/* Keep one loading region until real issue groups are available */}
+              <div className="mt-8 overflow-hidden rounded-xl border bg-card">
+                <div className="flex flex-wrap items-center justify-between gap-4 px-4 py-4">
+                  <span className="font-semibold">{t('Issues')}</span>
+                  <Skeleton className="h-8 w-40" />
+                </div>
+                <div className="flex min-h-72 flex-col items-center justify-center gap-4 border-t">
+                  <span className="relative block h-0.5 w-12 overflow-hidden rounded-full bg-foreground/10">
+                    <span className="absolute inset-y-0 left-1/3 w-1/3 rounded-full bg-foreground/50 motion-safe:animate-[issuel-loading_1.6s_ease-in-out_infinite]" />
+                  </span>
+                  <p className="text-xs text-muted-foreground">
+                    {t('Loading workspace…')}
+                  </p>
+                </div>
+              </div>
+            </div>
+          </div>
+        ) : error ? (
+          <h1 className="text-xl font-semibold">
+            {t('Workspace unavailable')}
+          </h1>
+        ) : location.pathname !== '/' && !match ? (
+          <div>
+            <h1 className="text-xl font-semibold">{t('Page not found')}</h1>
+            <Link to="/" className="mt-4 inline-block underline">
+              {t('Choose a workspace')}
+            </Link>
+          </div>
+        ) : selected && match ? (
+          <Workspace
+            key={`${userId}:${selected.id}`}
+            userId={userId}
+            repository={selected}
+            onSessionExpired={onSessionExpired}
+          />
+        ) : (
+          <div>
+            <h1 className="text-xl font-semibold">
+              {t(
+                match
+                  ? 'Repository not found or not authorized'
+                  : 'Choose a repository',
+              )}
+            </h1>
+            <p className="mt-3 text-sm text-muted-foreground">
+              {t(
+                match
+                  ? 'This workspace is unavailable to your GitHub account and App. Choose another repository or update App access.'
+                  : 'Choose a repository from the sidebar to open its issues.',
+              )}
+            </p>
+          </div>
+        )}
+      </main>
     </div>
   )
 }

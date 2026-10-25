@@ -47,11 +47,25 @@
     @apply border-border;
   }
 
+  html {
+    scrollbar-gutter: stable;
+  }
+
   body {
     @apply m-0 bg-background text-foreground antialiased;
   }
 
   button:not(:disabled) {
     cursor: pointer;
+  }
+}
+
+@keyframes issuel-loading {
+  0% {
+    transform: translateX(-200%);
+  }
+
+  100% {
+    transform: translateX(200%);
   }
 }

@@ -1,11 +1,23 @@
-import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'node:crypto'
+import {
+  createCipheriv,
+  createDecipheriv,
+  createHash,
+  randomBytes,
+} from 'node:crypto'
 import { chmodSync, mkdirSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { Hono } from 'hono'
 import { deleteCookie, getCookie, setCookie } from 'hono/cookie'
 import type { Context } from 'hono'
-import { discoverRepositories, RepositoryError, resolveWorkspace } from './repositories.ts'
+import {
+  discoverRepositories,
+  RepositoryError,
+  resolveWorkspace,
+} from './repositories.ts'
+import { readIssues } from './issues.ts'
+import { defaultStatuses } from './issue-status.ts'
+import { githubFetch } from './logging.ts'
 
 const FLOW_TTL = 10 * 60_000
 const SESSION_TTL = 30 * 24 * 60 * 60_000
@@ -58,13 +70,21 @@ export function readConfig(): Config {
   const encryptionKey = process.env.SESSION_ENCRYPTION_KEY
   const secureSetting = process.env.SESSION_COOKIE_SECURE
   if (!clientId?.trim()) throw new Error('GITHUB_APP_CLIENT_ID is required.')
-  if (!clientSecret?.trim()) throw new Error('GITHUB_APP_CLIENT_SECRET is required.')
-  if (!callbackUrl?.trim()) throw new Error('GITHUB_OAUTH_CALLBACK_URL is required.')
-  if (!encryptionKey?.trim()) throw new Error('SESSION_ENCRYPTION_KEY is required.')
+  if (!clientSecret?.trim())
+    throw new Error('GITHUB_APP_CLIENT_SECRET is required.')
+  if (!callbackUrl?.trim())
+    throw new Error('GITHUB_OAUTH_CALLBACK_URL is required.')
+  if (!encryptionKey?.trim())
+    throw new Error('SESSION_ENCRYPTION_KEY is required.')
   if (!/^[a-fA-F0-9]{64}$/.test(encryptionKey)) {
-    throw new Error('SESSION_ENCRYPTION_KEY must contain exactly 64 hexadecimal characters.')
+    throw new Error(
+      'SESSION_ENCRYPTION_KEY must contain exactly 64 hexadecimal characters.',
+    )
   }
-  if (secureSetting !== undefined && !['true', 'false'].includes(secureSetting)) {
+  if (
+    secureSetting !== undefined &&
+    !['true', 'false'].includes(secureSetting)
+  ) {
     throw new Error('SESSION_COOKIE_SECURE must be true or false.')
   }
 
@@ -72,28 +92,44 @@ export function readConfig(): Config {
   try {
     callback = new URL(callbackUrl)
   } catch {
-    throw new Error('GITHUB_OAUTH_CALLBACK_URL must be a valid HTTP or HTTPS callback URL.')
+    throw new Error(
+      'GITHUB_OAUTH_CALLBACK_URL must be a valid HTTP or HTTPS callback URL.',
+    )
   }
   if (
-    callback.pathname !== '/api/auth/callback' || callback.search || callback.hash ||
-    callback.username || callback.password || !['http:', 'https:'].includes(callback.protocol)
+    callback.pathname !== '/api/auth/callback' ||
+    callback.search ||
+    callback.hash ||
+    callback.username ||
+    callback.password ||
+    !['http:', 'https:'].includes(callback.protocol)
   ) {
-    throw new Error('GITHUB_OAUTH_CALLBACK_URL must use /api/auth/callback without query, fragment or credentials.')
+    throw new Error(
+      'GITHUB_OAUTH_CALLBACK_URL must use /api/auth/callback without query, fragment or credentials.',
+    )
   }
   const secure = secureSetting !== 'false'
   const local = ['localhost', '127.0.0.1', '[::1]'].includes(callback.hostname)
   if (
     (!secure && (!local || process.env.NODE_ENV === 'production')) ||
-    (callback.protocol !== 'https:' && (secure || !local || process.env.NODE_ENV === 'production'))
+    (callback.protocol !== 'https:' &&
+      (secure || !local || process.env.NODE_ENV === 'production'))
   ) {
-    throw new Error('GITHUB_OAUTH_CALLBACK_URL and SESSION_COOKIE_SECURE require HTTPS and secure cookies outside local development.')
+    throw new Error(
+      'GITHUB_OAUTH_CALLBACK_URL and SESSION_COOKIE_SECURE require HTTPS and secure cookies outside local development.',
+    )
   }
   const databasePath = process.env.SQLITE_DATABASE_PATH ?? './data/auth.sqlite'
   if (!databasePath.trim() || databasePath === ':memory:') {
-    throw new Error('SQLITE_DATABASE_PATH must specify a persistent database file.')
+    throw new Error(
+      'SQLITE_DATABASE_PATH must specify a persistent database file.',
+    )
   }
   return {
-    clientId, clientSecret, callback, secure,
+    clientId,
+    clientSecret,
+    callback,
+    secure,
     encryptionKey: Buffer.from(encryptionKey, 'hex'),
     databasePath: resolve(databasePath),
   }
@@ -109,8 +145,13 @@ function encrypt(value: string, key: Buffer, purpose: string) {
   const nonce = randomBytes(12)
   const cipher = createCipheriv('aes-256-gcm', key, nonce)
   cipher.setAAD(Buffer.from(purpose))
-  const ciphertext = Buffer.concat([cipher.update(value, 'utf8'), cipher.final()])
-  return Buffer.concat([nonce, cipher.getAuthTag(), ciphertext]).toString('base64url')
+  const ciphertext = Buffer.concat([
+    cipher.update(value, 'utf8'),
+    cipher.final(),
+  ])
+  return Buffer.concat([nonce, cipher.getAuthTag(), ciphertext]).toString(
+    'base64url',
+  )
 }
 
 /** Authenticate stored ciphertext before returning its plaintext to backend code. */
@@ -119,11 +160,16 @@ function decrypt(value: string, key: Buffer, purpose: string) {
   const cipher = createDecipheriv('aes-256-gcm', key, packed.subarray(0, 12))
   cipher.setAAD(Buffer.from(purpose))
   cipher.setAuthTag(packed.subarray(12, 28))
-  return Buffer.concat([cipher.update(packed.subarray(28)), cipher.final()]).toString('utf8')
+  return Buffer.concat([
+    cipher.update(packed.subarray(28)),
+    cipher.final(),
+  ]).toString('utf8')
 }
 
 /** Read a JSON object while treating malformed provider responses as temporary errors. */
-async function responseObject(response: Response): Promise<Record<string, unknown>> {
+async function responseObject(
+  response: Response,
+): Promise<Record<string, unknown>> {
   const data: unknown = await response.json().catch(() => null)
   if (!data || typeof data !== 'object' || Array.isArray(data)) {
     throw new AuthError('github_unavailable')
@@ -131,58 +177,100 @@ async function responseObject(response: Response): Promise<Record<string, unknow
   return data as Record<string, unknown>
 }
 
-/** Exchange codes or refresh tokens using GitHub's documented form POST endpoint. */
-async function exchange(config: Config, fields: Record<string, string>): Promise<Tokens> {
+/** Trace code/token exchanges without exposing their form fields or response bodies. */
+async function exchange(
+  config: Config,
+  fields: Record<string, string>,
+): Promise<Tokens> {
   const startedAt = Date.now()
-  const response = await fetch('https://github.com/login/oauth/access_token', {
-    method: 'POST',
-    headers: { Accept: 'application/json', 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: new URLSearchParams({ client_id: config.clientId, client_secret: config.clientSecret, ...fields }),
-    signal: AbortSignal.timeout(REQUEST_TIMEOUT),
-    redirect: 'error',
-  })
-  if (response.status === 429 || response.status >= 500) throw new AuthError('github_unavailable')
+  const response = await githubFetch(
+    'https://github.com/login/oauth/access_token',
+    {
+      method: 'POST',
+      headers: {
+        Accept: 'application/json',
+        'Content-Type': 'application/x-www-form-urlencoded',
+      },
+      body: new URLSearchParams({
+        client_id: config.clientId,
+        client_secret: config.clientSecret,
+        ...fields,
+      }),
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT),
+      redirect: 'error',
+    },
+  )
+  if (response.status === 429 || response.status >= 500)
+    throw new AuthError('github_unavailable')
   const data = await responseObject(response)
-  if (['bad_refresh_token', 'invalid_grant', 'expired_token', 'bad_verification_code'].includes(String(data.error))) {
+  if (
+    [
+      'bad_refresh_token',
+      'invalid_grant',
+      'expired_token',
+      'bad_verification_code',
+    ].includes(String(data.error))
+  ) {
     throw new AuthError('reauthentication_required', 401)
   }
-  if (!response.ok || data.error) throw new AuthError('github_authorization_failed')
+  if (!response.ok || data.error)
+    throw new AuthError('github_authorization_failed')
   if (
-    typeof data.access_token !== 'string' || !data.access_token ||
-    typeof data.refresh_token !== 'string' || !data.refresh_token ||
+    typeof data.access_token !== 'string' ||
+    !data.access_token ||
+    typeof data.refresh_token !== 'string' ||
+    !data.refresh_token ||
     data.token_type !== 'bearer' ||
-    typeof data.expires_in !== 'number' || !Number.isSafeInteger(data.expires_in) ||
-    data.expires_in <= 0 || data.expires_in > 31_536_000 ||
-    typeof data.refresh_token_expires_in !== 'number' || !Number.isSafeInteger(data.refresh_token_expires_in) ||
-    data.refresh_token_expires_in <= 0 || data.refresh_token_expires_in > 31_536_000
-  ) throw new AuthError('expiring_tokens_required')
+    typeof data.expires_in !== 'number' ||
+    !Number.isSafeInteger(data.expires_in) ||
+    data.expires_in <= 0 ||
+    data.expires_in > 31_536_000 ||
+    typeof data.refresh_token_expires_in !== 'number' ||
+    !Number.isSafeInteger(data.refresh_token_expires_in) ||
+    data.refresh_token_expires_in <= 0 ||
+    data.refresh_token_expires_in > 31_536_000
+  )
+    throw new AuthError('expiring_tokens_required')
   return {
-    access: data.access_token, refresh: data.refresh_token,
+    access: data.access_token,
+    refresh: data.refresh_token,
     accessExpiresAt: startedAt + data.expires_in * 1000,
     refreshExpiresAt: startedAt + data.refresh_token_expires_in * 1000,
   }
 }
 
-/** Obtain only public identity fields and distinguish revocation from provider outages. */
+/** Trace identity reads and distinguish revocation from outages while exposing only public fields. */
 async function githubUser(accessToken: string) {
-  const response = await fetch('https://api.github.com/user', {
+  const response = await githubFetch('https://api.github.com/user', {
     headers: {
-      Accept: 'application/vnd.github+json', Authorization: `Bearer ${accessToken}`,
-      'X-GitHub-Api-Version': '2026-03-10', 'User-Agent': 'Issuel',
+      Accept: 'application/vnd.github+json',
+      Authorization: `Bearer ${accessToken}`,
+      'X-GitHub-Api-Version': '2026-03-10',
+      'User-Agent': 'Issuel',
     },
     signal: AbortSignal.timeout(REQUEST_TIMEOUT),
     redirect: 'error',
   })
-  if (response.status === 401) throw new AuthError('reauthentication_required', 401)
+  if (response.status === 401)
+    throw new AuthError('reauthentication_required', 401)
   if (!response.ok) throw new AuthError('github_unavailable')
   const user = await responseObject(response)
-  if (!Number.isSafeInteger(user.id) || Number(user.id) <= 0 || typeof user.login !== 'string' || !user.login) {
+  if (
+    !Number.isSafeInteger(user.id) ||
+    Number(user.id) <= 0 ||
+    typeof user.login !== 'string' ||
+    !user.login
+  ) {
     throw new AuthError('github_unavailable')
   }
-  return { id: String(user.id), login: user.login, name: typeof user.name === 'string' ? user.name : null }
+  return {
+    id: String(user.id),
+    login: user.login,
+    name: typeof user.name === 'string' ? user.name : null,
+  }
 }
 
-/** Mount authentication, session-bound discovery and origin protection with one SQLite connection. */
+/** Mount authentication, authorized repository reads and origin protection with one SQLite connection. */
 export function createAuth() {
   const app = new Hono()
   let config: Config | null = null
@@ -231,9 +319,16 @@ export function createAuth() {
     }
   }
 
-  const sessionCookie = config?.secure ? '__Host-issuel_session' : 'issuel_session'
+  const sessionCookie = config?.secure
+    ? '__Host-issuel_session'
+    : 'issuel_session'
   const flowCookie = config?.secure ? '__Host-issuel_oauth' : 'issuel_oauth'
-  const cookieOptions = { httpOnly: true, secure: config?.secure ?? true, sameSite: 'Lax' as const, path: '/' }
+  const cookieOptions = {
+    httpOnly: true,
+    secure: config?.secure ?? true,
+    sameSite: 'Lax' as const,
+    path: '/',
+  }
 
   /** Remove a cookie with the same host, path and transport restrictions used to set it. */
   function clearCookie(c: Context, name: string) {
@@ -248,7 +343,9 @@ export function createAuth() {
 
   /** Delete expired auth material without storing unrelated application data. */
   function cleanup() {
-    db().prepare('DELETE FROM oauth_flows WHERE expires_at <= ?').run(Date.now())
+    db()
+      .prepare('DELETE FROM oauth_flows WHERE expires_at <= ?')
+      .run(Date.now())
     db().prepare('DELETE FROM sessions WHERE expires_at <= ?').run(Date.now())
   }
 
@@ -257,44 +354,78 @@ export function createAuth() {
     if (!config) throw new AuthError('auth_not_configured')
     if (session.refresh_started_at !== null) {
       if (session.refresh_started_at <= Date.now() - 60_000) {
-        db().prepare('DELETE FROM sessions WHERE id_hash = ? AND refresh_started_at = ?')
+        db()
+          .prepare(
+            'DELETE FROM sessions WHERE id_hash = ? AND refresh_started_at = ?',
+          )
           .run(session.id_hash, session.refresh_started_at)
         throw new AuthError('reauthentication_required', 401)
       }
       throw new AuthError('refresh_in_progress')
     }
     if (session.access_expires_at > Date.now() + REFRESH_MARGIN) {
-      return decrypt(session.access_token, config.encryptionKey, `${session.id_hash}:access`)
+      return decrypt(
+        session.access_token,
+        config.encryptionKey,
+        `${session.id_hash}:access`,
+      )
     }
-    if (session.refresh_expires_at <= Date.now()) throw new AuthError('reauthentication_required', 401)
+    if (session.refresh_expires_at <= Date.now())
+      throw new AuthError('reauthentication_required', 401)
     const startedAt = Date.now()
-    const claimed = db().prepare(`UPDATE sessions SET refresh_started_at = ?
-      WHERE id_hash = ? AND refresh_started_at IS NULL AND access_token = ? AND expires_at > ?`)
+    const claimed = db()
+      .prepare(
+        `UPDATE sessions SET refresh_started_at = ?
+      WHERE id_hash = ? AND refresh_started_at IS NULL AND access_token = ? AND expires_at > ?`,
+      )
       .run(startedAt, session.id_hash, session.access_token, startedAt)
     if (!claimed.changes) throw new AuthError('refresh_in_progress')
     let rotated = false
     try {
       const tokens = await exchange(config, {
         grant_type: 'refresh_token',
-        refresh_token: decrypt(session.refresh_token, config.encryptionKey, `${session.id_hash}:refresh`),
+        refresh_token: decrypt(
+          session.refresh_token,
+          config.encryptionKey,
+          `${session.id_hash}:refresh`,
+        ),
       })
       rotated = true
-      const encryptedAccess = encrypt(tokens.access, config.encryptionKey, `${session.id_hash}:access`)
-      const saved = db().prepare(`UPDATE sessions SET access_token = ?, refresh_token = ?,
+      const encryptedAccess = encrypt(
+        tokens.access,
+        config.encryptionKey,
+        `${session.id_hash}:access`,
+      )
+      const saved = db()
+        .prepare(
+          `UPDATE sessions SET access_token = ?, refresh_token = ?,
         access_expires_at = ?, refresh_expires_at = ?, refresh_started_at = NULL
-        WHERE id_hash = ? AND refresh_started_at = ? AND expires_at > ?`)
+        WHERE id_hash = ? AND refresh_started_at = ? AND expires_at > ?`,
+        )
         .run(
           encryptedAccess,
-          encrypt(tokens.refresh, config.encryptionKey, `${session.id_hash}:refresh`),
-          tokens.accessExpiresAt, tokens.refreshExpiresAt, session.id_hash, startedAt, Date.now(),
+          encrypt(
+            tokens.refresh,
+            config.encryptionKey,
+            `${session.id_hash}:refresh`,
+          ),
+          tokens.accessExpiresAt,
+          tokens.refreshExpiresAt,
+          session.id_hash,
+          startedAt,
+          Date.now(),
         )
       if (!saved.changes) throw new AuthError('reauthentication_required', 401)
       session.access_token = encryptedAccess
       return tokens.access
     } finally {
       // Preserve the claim if rotation succeeded but persistence failed: never reuse that refresh token.
-      if (!rotated) db().prepare('UPDATE sessions SET refresh_started_at = NULL WHERE id_hash = ? AND refresh_started_at = ?')
-        .run(session.id_hash, startedAt)
+      if (!rotated)
+        db()
+          .prepare(
+            'UPDATE sessions SET refresh_started_at = NULL WHERE id_hash = ? AND refresh_started_at = ?',
+          )
+          .run(session.id_hash, startedAt)
     }
   }
 
@@ -305,7 +436,10 @@ export function createAuth() {
     // Every future unsafe API route inherits this exact configured-origin check.
     if (!['GET', 'HEAD', 'OPTIONS'].includes(c.req.method)) {
       if (!config) return c.json({ error: 'auth_not_configured' }, 503)
-      if (c.req.header('Origin') !== config.callback.origin || c.req.header('Sec-Fetch-Site') === 'cross-site') {
+      if (
+        c.req.header('Origin') !== config.callback.origin ||
+        c.req.header('Sec-Fetch-Site') === 'cross-site'
+      ) {
         return c.json({ error: 'invalid_origin' }, 403)
       }
     }
@@ -320,9 +454,15 @@ export function createAuth() {
   app.onError((error, c) => {
     if (error instanceof RepositoryError) {
       if (error.retryAfter) c.header('Retry-After', String(error.retryAfter))
-      return c.json({ error: error.message, retryAfter: error.retryAfter }, error.status)
+      return c.json(
+        { error: error.message, retryAfter: error.retryAfter },
+        error.status,
+      )
     }
-    const failure = error instanceof AuthError ? error : new AuthError('authentication_unavailable')
+    const failure =
+      error instanceof AuthError
+        ? error
+        : new AuthError('authentication_unavailable')
     if (failure.status === 503) c.header('Retry-After', '5')
     return c.json({ error: failure.message }, failure.status)
   })
@@ -331,19 +471,34 @@ export function createAuth() {
     if (!config) throw new AuthError('auth_not_configured')
     cleanup()
     const previousBrowser = cookieId(c, flowCookie)
-    if (previousBrowser) db().prepare('DELETE FROM oauth_flows WHERE browser_hash = ?').run(hash(previousBrowser))
+    if (previousBrowser)
+      db()
+        .prepare('DELETE FROM oauth_flows WHERE browser_hash = ?')
+        .run(hash(previousBrowser))
     const state = randomBytes(32).toString('base64url')
     const browser = randomBytes(32).toString('base64url')
     const verifier = randomBytes(32).toString('base64url')
-    db().prepare('INSERT INTO oauth_flows VALUES (?, ?, ?, ?)').run(
-      hash(state), hash(browser), encrypt(verifier, config.encryptionKey, `${hash(state)}:pkce`), Date.now() + FLOW_TTL,
-    )
-    setCookie(c, flowCookie, browser, { ...cookieOptions, maxAge: FLOW_TTL / 1000 })
+    db()
+      .prepare('INSERT INTO oauth_flows VALUES (?, ?, ?, ?)')
+      .run(
+        hash(state),
+        hash(browser),
+        encrypt(verifier, config.encryptionKey, `${hash(state)}:pkce`),
+        Date.now() + FLOW_TTL,
+      )
+    setCookie(c, flowCookie, browser, {
+      ...cookieOptions,
+      maxAge: FLOW_TTL / 1000,
+    })
     const authorization = new URL('https://github.com/login/oauth/authorize')
     authorization.search = new URLSearchParams({
-      client_id: config.clientId, redirect_uri: config.callback.href, state,
+      client_id: config.clientId,
+      redirect_uri: config.callback.href,
+      state,
       prompt: 'select_account',
-      scope: 'offline_access', code_challenge: hash(verifier), code_challenge_method: 'S256',
+      scope: 'offline_access',
+      code_challenge: hash(verifier),
+      code_challenge_method: 'S256',
     }).toString()
     return c.redirect(authorization.href, 303)
   })
@@ -354,43 +509,72 @@ export function createAuth() {
     try {
       const state = c.req.queries('state')
       const browser = cookieId(c, flowCookie)
-      if (!state || state.length !== 1 || !/^[A-Za-z0-9_-]{43}$/.test(state[0]) || !browser) {
+      if (
+        !state ||
+        state.length !== 1 ||
+        !/^[A-Za-z0-9_-]{43}$/.test(state[0]) ||
+        !browser
+      ) {
         return c.redirect('/?auth_error=invalid_oauth_flow', 303)
       }
       // DELETE RETURNING consumes the browser-bound flow atomically before any network call.
-      const flow = db().prepare(`DELETE FROM oauth_flows
-        WHERE state_hash = ? AND browser_hash = ? AND expires_at > ? RETURNING verifier`)
-        .get(hash(state[0]), hash(browser), Date.now()) as { verifier: string } | undefined
+      const flow = db()
+        .prepare(
+          `DELETE FROM oauth_flows
+        WHERE state_hash = ? AND browser_hash = ? AND expires_at > ? RETURNING verifier`,
+        )
+        .get(hash(state[0]), hash(browser), Date.now()) as
+        { verifier: string } | undefined
       if (!flow) return c.redirect('/?auth_error=invalid_oauth_flow', 303)
-      if (c.req.query('error')) return c.redirect('/?auth_error=authorization_denied', 303)
+      if (c.req.query('error'))
+        return c.redirect('/?auth_error=authorization_denied', 303)
       const codes = c.req.queries('code')
       if (!codes || codes.length !== 1 || !codes[0] || codes[0].length > 1024) {
         return c.redirect('/?auth_error=invalid_oauth_flow', 303)
       }
       const tokens = await exchange(config, {
-        code: codes[0], redirect_uri: config.callback.href,
-        code_verifier: decrypt(flow.verifier, config.encryptionKey, `${hash(state[0])}:pkce`),
+        code: codes[0],
+        redirect_uri: config.callback.href,
+        code_verifier: decrypt(
+          flow.verifier,
+          config.encryptionKey,
+          `${hash(state[0])}:pkce`,
+        ),
       })
       const user = await githubUser(tokens.access)
       const id = randomBytes(32).toString('base64url')
       const idHash = hash(id)
-      const expiresAt = Math.min(Date.now() + SESSION_TTL, tokens.refreshExpiresAt)
+      const expiresAt = Math.min(
+        Date.now() + SESSION_TTL,
+        tokens.refreshExpiresAt,
+      )
       const previousId = cookieId(c, sessionCookie)
       db().exec('BEGIN IMMEDIATE')
       try {
-        if (previousId) db().prepare('DELETE FROM sessions WHERE id_hash = ?').run(hash(previousId))
-        db().prepare('INSERT INTO sessions VALUES (?, ?, ?, ?, ?, ?, ?, NULL)').run(
-          idHash, user.id,
-          encrypt(tokens.access, config.encryptionKey, `${idHash}:access`),
-          encrypt(tokens.refresh, config.encryptionKey, `${idHash}:refresh`),
-          tokens.accessExpiresAt, tokens.refreshExpiresAt, expiresAt,
-        )
+        if (previousId)
+          db()
+            .prepare('DELETE FROM sessions WHERE id_hash = ?')
+            .run(hash(previousId))
+        db()
+          .prepare('INSERT INTO sessions VALUES (?, ?, ?, ?, ?, ?, ?, NULL)')
+          .run(
+            idHash,
+            user.id,
+            encrypt(tokens.access, config.encryptionKey, `${idHash}:access`),
+            encrypt(tokens.refresh, config.encryptionKey, `${idHash}:refresh`),
+            tokens.accessExpiresAt,
+            tokens.refreshExpiresAt,
+            expiresAt,
+          )
         db().exec('COMMIT')
       } catch (error) {
         db().exec('ROLLBACK')
         throw error
       }
-      setCookie(c, sessionCookie, id, { ...cookieOptions, maxAge: Math.floor((expiresAt - Date.now()) / 1000) })
+      setCookie(c, sessionCookie, id, {
+        ...cookieOptions,
+        maxAge: Math.floor((expiresAt - Date.now()) / 1000),
+      })
       cleanup()
       return c.redirect('/', 303)
     } catch {
@@ -398,68 +582,164 @@ export function createAuth() {
     }
   })
 
-  app.on('GET', ['/auth/session', '/repositories', '/workspaces/:owner/:repo'], async (c) => {
-    if (!config) throw new AuthError('auth_not_configured')
-    const id = cookieId(c, sessionCookie)
-    if (!id) {
-      clearCookie(c, sessionCookie)
-      return c.json({ error: 'unauthorized' }, 401)
-    }
-    cleanup()
-    const idHash = hash(id)
-    const session = db().prepare('SELECT * FROM sessions WHERE id_hash = ? AND expires_at > ?')
-      .get(idHash, Date.now()) as Session | undefined
-    if (!session) {
-      clearCookie(c, sessionCookie)
-      return c.json({ error: 'unauthorized' }, 401)
-    }
-    try {
-      const token = await accessToken(session)
-      const owner = c.req.param('owner')
-      const repo = c.req.param('repo')
-      let result
-      let status: 200 | 404 = 200
-      if ((owner && repo) || c.req.path.endsWith('/repositories')) {
-        const discovery = await discoverRepositories(token, config.clientId)
-        result = { ...discovery, userId: session.github_user_id }
-        if (owner && repo) {
-          const repository = await resolveWorkspace(
-            token, discovery.repositories, owner, repo,
-            c.req.query('repositoryId'),
-          )
-          result = { ...result, repository, error: repository ? null : 'workspace_not_found' }
-          if (!repository) status = 404
-        }
-      } else {
-        const user = await githubUser(token)
-        if (user.id !== session.github_user_id) throw new AuthError('reauthentication_required', 401)
-        result = { user, expiresAt: session.expires_at }
-      }
-      // Logout or expiry during an upstream request must not restore a session in the response.
-      if (!db().prepare('SELECT 1 FROM sessions WHERE id_hash = ? AND expires_at > ?').get(idHash, Date.now())) {
-        throw new AuthError('unauthorized', 401)
-      }
-      return c.json(result, status)
-    } catch (error) {
-      if ((error instanceof AuthError || error instanceof RepositoryError) && error.status === 401) {
-        // An older request may receive 401 after another request has rotated its token.
-        const removed = db().prepare(`DELETE FROM sessions
-          WHERE id_hash = ? AND access_token = ? AND refresh_started_at IS NULL`)
-          .run(idHash, session.access_token)
-        if (!removed.changes && db().prepare('SELECT 1 FROM sessions WHERE id_hash = ? AND expires_at > ?').get(idHash, Date.now())) {
-          throw new AuthError('refresh_in_progress')
-        }
+  app.on(
+    'GET',
+    [
+      '/auth/session',
+      '/repositories',
+      '/workspaces/:owner/:repo',
+      '/repositories/:repositoryId/issues',
+    ],
+    async (c) => {
+      if (!config) throw new AuthError('auth_not_configured')
+      const id = cookieId(c, sessionCookie)
+      if (!id) {
         clearCookie(c, sessionCookie)
+        return c.json({ error: 'unauthorized' }, 401)
       }
-      throw error
-    }
-  })
+      cleanup()
+      const idHash = hash(id)
+      const session = db()
+        .prepare('SELECT * FROM sessions WHERE id_hash = ? AND expires_at > ?')
+        .get(idHash, Date.now()) as Session | undefined
+      if (!session) {
+        clearCookie(c, sessionCookie)
+        return c.json({ error: 'unauthorized' }, 401)
+      }
+      try {
+        const token = await accessToken(session)
+        const owner = c.req.param('owner')
+        const repo = c.req.param('repo')
+        const repositoryId = c.req.param('repositoryId')
+        let result
+        let status: 200 | 404 = 200
+        if (repositoryId) {
+          const state = c.req.query('state') ?? 'open'
+          const page = c.req.query('page') ?? '1'
+          const perPage =
+            c.req.query('per_page') ?? (state === 'closed' ? '10' : '100')
+          const requestedCategory = c.req.query('category')
+          const category = defaultStatuses.find(
+            (status) =>
+              status.id === (requestedCategory ?? 'done') &&
+              status.state === 'closed',
+          )
+          if (
+            !/^[1-9]\d*$/.test(repositoryId) ||
+            !Number.isSafeInteger(Number(repositoryId)) ||
+            (state !== 'open' && state !== 'closed') ||
+            !/^[1-9]\d*$/.test(page) ||
+            !Number.isSafeInteger(Number(page)) ||
+            !/^[1-9]\d*$/.test(perPage) ||
+            Number(perPage) > 100 ||
+            (state === 'open' ? requestedCategory !== undefined : !category) ||
+            (state === 'closed' &&
+              (Number(page) - 1) * Number(perPage) >= 1000) ||
+            ['state', 'page', 'per_page', 'category'].some(
+              (parameter) => (c.req.queries(parameter)?.length ?? 0) > 1,
+            )
+          )
+            return c.json({ error: 'invalid_issue_parameters' }, 400)
+          const discovery = await discoverRepositories(token, config.clientId)
+          const repository = discovery.repositories.find(
+            (item) => String(item.id) === repositoryId,
+          )
+          if (!repository) return c.json({ error: 'workspace_not_found' }, 404)
+          if (
+            !repository.installations.some((installation) =>
+              ['read', 'write'].includes(installation.permissions.issues),
+            )
+          ) {
+            return c.json({ error: 'github_forbidden' }, 403)
+          }
+          const issues = await readIssues(
+            token,
+            repository,
+            state,
+            Number(page),
+            Number(perPage),
+            state === 'closed' && category?.state === 'closed'
+              ? category.id
+              : undefined,
+          )
+          result = {
+            ...issues,
+            userId: session.github_user_id,
+            repositoryId: repository.id,
+            state,
+          }
+        } else if ((owner && repo) || c.req.path.endsWith('/repositories')) {
+          const discovery = await discoverRepositories(token, config.clientId)
+          result = { ...discovery, userId: session.github_user_id }
+          if (owner && repo) {
+            const repository = await resolveWorkspace(
+              token,
+              discovery.repositories,
+              owner,
+              repo,
+              c.req.query('repositoryId'),
+            )
+            result = {
+              ...result,
+              repository,
+              error: repository ? null : 'workspace_not_found',
+            }
+            if (!repository) status = 404
+          }
+        } else {
+          const user = await githubUser(token)
+          if (user.id !== session.github_user_id)
+            throw new AuthError('reauthentication_required', 401)
+          result = { user, expiresAt: session.expires_at }
+        }
+        // Logout or expiry during an upstream request must not restore a session in the response.
+        if (
+          !db()
+            .prepare(
+              'SELECT 1 FROM sessions WHERE id_hash = ? AND expires_at > ?',
+            )
+            .get(idHash, Date.now())
+        ) {
+          throw new AuthError('unauthorized', 401)
+        }
+        return c.json(result, status)
+      } catch (error) {
+        if (
+          (error instanceof AuthError || error instanceof RepositoryError) &&
+          error.status === 401
+        ) {
+          // An older request may receive 401 after another request has rotated its token.
+          const removed = db()
+            .prepare(
+              `DELETE FROM sessions
+          WHERE id_hash = ? AND access_token = ? AND refresh_started_at IS NULL`,
+            )
+            .run(idHash, session.access_token)
+          if (
+            !removed.changes &&
+            db()
+              .prepare(
+                'SELECT 1 FROM sessions WHERE id_hash = ? AND expires_at > ?',
+              )
+              .get(idHash, Date.now())
+          ) {
+            throw new AuthError('refresh_in_progress')
+          }
+          clearCookie(c, sessionCookie)
+        }
+        throw error
+      }
+    },
+  )
 
   app.post('/auth/logout', (c) => {
     const id = cookieId(c, sessionCookie)
     if (id) db().prepare('DELETE FROM sessions WHERE id_hash = ?').run(hash(id))
     const browser = cookieId(c, flowCookie)
-    if (browser) db().prepare('DELETE FROM oauth_flows WHERE browser_hash = ?').run(hash(browser))
+    if (browser)
+      db()
+        .prepare('DELETE FROM oauth_flows WHERE browser_hash = ?')
+        .run(hash(browser))
     clearCookie(c, sessionCookie)
     clearCookie(c, flowCookie)
     return c.body(null, 204)
