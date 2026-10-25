@@ -280,6 +280,50 @@ export function createAuth() {
     // Production health and SPA remain available; auth endpoints return a sanitized 503.
   }
   let database: DatabaseSync | undefined
+  const repositoryAccess = new Map<
+    string,
+    {
+      tokenHash: string
+      expiresAt: number
+      result: ReturnType<typeof discoverRepositories>
+    }
+  >()
+
+  /** Share complete access snapshots for 30 seconds within one session and token generation. */
+  async function repositoriesForSession(
+    sessionId: string,
+    token: string,
+    refresh: boolean,
+  ) {
+    const now = Date.now()
+    for (const [id, entry] of repositoryAccess) {
+      if (entry.expiresAt <= now) repositoryAccess.delete(id)
+    }
+    const tokenHash = hash(token)
+    const cached = repositoryAccess.get(sessionId)
+    if (
+      cached?.tokenHash === tokenHash &&
+      (!refresh || cached.expiresAt === Infinity)
+    )
+      return cached.result
+    if (repositoryAccess.size >= 100)
+      repositoryAccess.delete(repositoryAccess.keys().next().value!)
+    const entry = {
+      tokenHash,
+      expiresAt: Infinity,
+      result: discoverRepositories(token, config!.clientId),
+    }
+    repositoryAccess.set(sessionId, entry)
+    try {
+      const discovery = await entry.result
+      entry.expiresAt = Date.now() + 30_000
+      return discovery
+    } catch (error) {
+      if (repositoryAccess.get(sessionId) === entry)
+        repositoryAccess.delete(sessionId)
+      throw error
+    }
+  }
 
   /** Open the auth database lazily; initialization failures stay inside sanitized handlers. */
   function db() {
@@ -640,7 +684,7 @@ export function createAuth() {
             )
           )
             return c.json({ error: 'invalid_issue_parameters' }, 400)
-          const discovery = await discoverRepositories(token, config.clientId)
+          const discovery = await repositoriesForSession(idHash, token, false)
           const repository = discovery.repositories.find(
             (item) => String(item.id) === repositoryId,
           )
@@ -669,7 +713,11 @@ export function createAuth() {
             state,
           }
         } else if ((owner && repo) || c.req.path.endsWith('/repositories')) {
-          const discovery = await discoverRepositories(token, config.clientId)
+          const discovery = await repositoriesForSession(
+            idHash,
+            token,
+            c.req.path.endsWith('/repositories'),
+          )
           result = { ...discovery, userId: session.github_user_id }
           if (owner && repo) {
             const repository = await resolveWorkspace(
@@ -705,6 +753,11 @@ export function createAuth() {
         return c.json(result, status)
       } catch (error) {
         if (
+          error instanceof RepositoryError &&
+          [401, 403, 404].includes(error.status)
+        )
+          repositoryAccess.delete(idHash)
+        if (
           (error instanceof AuthError || error instanceof RepositoryError) &&
           error.status === 401
         ) {
@@ -734,6 +787,7 @@ export function createAuth() {
 
   app.post('/auth/logout', (c) => {
     const id = cookieId(c, sessionCookie)
+    if (id) repositoryAccess.delete(hash(id))
     if (id) db().prepare('DELETE FROM sessions WHERE id_hash = ?').run(hash(id))
     const browser = cookieId(c, flowCookie)
     if (browser)

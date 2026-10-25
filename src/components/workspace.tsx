@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Button } from '@/components/ui/button'
 import {
@@ -210,7 +210,7 @@ function IssueRow({ issue }: { issue: Issue }) {
   )
 }
 
-/** Render Closed searches directly from their own pages and keep limits and failures visible per group. */
+/** Preserve group pagination during refresh failures and report refresh errors beside the toolbar action. */
 export function Workspace({
   userId,
   repository,
@@ -224,26 +224,29 @@ export function Workspace({
   const [stored, setStored] = useState(() =>
     readWorkspacePreferences(userId, repository.id),
   )
-  const open = useIssues(userId, repository.id, 'open', true)
+  const [refreshing, setRefreshing] = useState(false)
+  const [refreshError, setRefreshError] = useState<IssueReadError | null>(null)
+  const refreshPending = useRef(false)
+  const open = useIssues(userId, repository.id, 'open', !refreshing)
   const done = useIssues(
     userId,
     repository.id,
     'closed',
-    !!open.data && stored.preferences.expandedGroups.done,
+    !refreshing && !!open.data && stored.preferences.expandedGroups.done,
     'done',
   )
   const canceled = useIssues(
     userId,
     repository.id,
     'closed',
-    !!open.data && stored.preferences.expandedGroups.canceled,
+    !refreshing && !!open.data && stored.preferences.expandedGroups.canceled,
     'canceled',
   )
   const duplicate = useIssues(
     userId,
     repository.id,
     'closed',
-    !!open.data && stored.preferences.expandedGroups.duplicate,
+    !refreshing && !!open.data && stored.preferences.expandedGroups.duplicate,
     'duplicate',
   )
 
@@ -262,6 +265,56 @@ export function Workspace({
     duplicate.error,
     onSessionExpired,
   ])
+
+  const listRefreshing =
+    refreshing ||
+    [open, done, canceled, duplicate].some(
+      (query) => query.isRefreshing || query.isRefetching,
+    )
+
+  /** Refresh eligible queries while keeping failures out of accepted group and pagination state. */
+  async function refreshIssues() {
+    if (refreshPending.current || listRefreshing) return
+    refreshPending.current = true
+    setRefreshing(true)
+    setRefreshError(null)
+    try {
+      const results = await Promise.allSettled(
+        [
+          open,
+          ...([
+            ['done', done],
+            ['canceled', canceled],
+            ['duplicate', duplicate],
+          ] as const)
+            .filter(
+              ([id, query]) => stored.preferences.expandedGroups[id] && query.data,
+            )
+            .map(([, query]) => query),
+        ].map(async (query) => {
+          try {
+            return await query.refresh()
+          } catch (error) {
+            if (error instanceof IssueReadError && error.status === 401)
+              onSessionExpired()
+            throw error
+          }
+        }),
+      )
+      const failure = results.find((result) => result.status === 'rejected')
+      if (failure)
+        setRefreshError(
+          failure.reason instanceof IssueReadError
+            ? failure.reason
+            : new IssueReadError(
+                'Issues could not be loaded. Please retry shortly.',
+              ),
+        )
+    } finally {
+      refreshPending.current = false
+      setRefreshing(false)
+    }
+  }
 
   /** Persist a group toggle or sort choice under this user's stable repository identity. */
   function savePreferences(preferences: WorkspacePreferences) {
@@ -322,30 +375,77 @@ export function Workspace({
           <h2 id="issues-heading" className="font-semibold">
             {t('Issues')}
           </h2>
-          <Select
-            value={stored.preferences.sort}
-            onValueChange={(value) => {
-              if (
-                value === 'updated' ||
-                value === 'created' ||
-                value === 'title'
-              )
-                savePreferences({ ...stored.preferences, sort: value })
-            }}
-          >
-            <SelectTrigger
-              aria-label={t('Sort loaded issues')}
-              className="h-8 w-40 text-xs"
+          <div className="flex flex-wrap items-center gap-2">
+            <Button
+              variant="outline"
+              aria-label={t(listRefreshing ? 'Refreshing…' : 'Refresh issues')}
+              aria-busy={listRefreshing}
+              title={t(listRefreshing ? 'Refreshing…' : 'Refresh issues')}
+              className="size-8 border-transparent bg-transparent p-0 text-muted-foreground shadow-none"
+              disabled={listRefreshing || !open.data || open.isPaused}
+              onClick={() => void refreshIssues()}
             >
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="updated">{t('Last updated ↓')}</SelectItem>
-              <SelectItem value="created">{t('Created date ↓')}</SelectItem>
-              <SelectItem value="title">{t('Title A–Z')}</SelectItem>
-            </SelectContent>
-          </Select>
+              <svg
+                aria-hidden="true"
+                className={`size-3.5 ${listRefreshing ? 'motion-safe:animate-spin' : ''}`}
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.8"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              >
+                {listRefreshing ? (
+                  <>
+                    <circle cx="12" cy="12" r="9" opacity="0.25" />
+                    <path d="M12 3a9 9 0 0 1 9 9" />
+                  </>
+                ) : (
+                  <>
+                    <path d="M20 7v5h-5M4 17v-5h5" />
+                    <path d="M6.1 7a7 7 0 0 1 11.6-1L20 9M4 15l2.3 3A7 7 0 0 0 17.9 17" />
+                  </>
+                )}
+              </svg>
+            </Button>
+
+            {refreshError && (
+              <p
+                role="alert"
+                title={t(refreshError.message)}
+                className="max-w-xs text-xs text-destructive"
+              >
+                {t('Issue refresh failed. Please retry.')}
+                {refreshError.status === 429 && ` ${t(refreshError.message)}`}
+              </p>
+            )}
+
+            <Select
+              value={stored.preferences.sort}
+              onValueChange={(value) => {
+                if (
+                  value === 'updated' ||
+                  value === 'created' ||
+                  value === 'title'
+                )
+                  savePreferences({ ...stored.preferences, sort: value })
+              }}
+            >
+              <SelectTrigger
+                aria-label={t('Sort loaded issues')}
+                className="h-8 w-40 text-xs"
+              >
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="updated">{t('Last updated ↓')}</SelectItem>
+                <SelectItem value="created">{t('Created date ↓')}</SelectItem>
+                <SelectItem value="title">{t('Title A–Z')}</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
         </div>
+
         {!open.data && !open.isError && (
           <div
             role="status"
@@ -397,7 +497,7 @@ export function Workspace({
             <Button
               variant="outline"
               className="h-8 text-xs"
-              disabled={open.isFetching || open.isPaused}
+              disabled={listRefreshing || open.isFetching || open.isPaused}
               onClick={() =>
                 void (open.data
                   ? open.fetchNextPage({ cancelRefetch: false })
@@ -579,7 +679,9 @@ export function Workspace({
                               status: t(group.title),
                             })}
                             className="h-11 w-full rounded-none border-x-0 border-b-0 text-xs text-muted-foreground shadow-none"
-                            disabled={query.isFetching || query.isPaused}
+                            disabled={
+                              listRefreshing || query.isFetching || query.isPaused
+                            }
                             onClick={() =>
                               void (query.data
                                 ? query.fetchNextPage({ cancelRefetch: false })

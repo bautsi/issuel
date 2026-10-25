@@ -10,7 +10,18 @@ type User = { id: string; login: string; name: string | null }
 /** Resolve authentication and offer a persistent app language beside the account actions. */
 export default function App() {
   const { t } = useTranslation()
-  const [queryClient] = useState(() => new QueryClient())
+  const [queryClient] = useState(
+    () =>
+      new QueryClient({
+        defaultOptions: {
+          queries: {
+            retry: false,
+            refetchOnWindowFocus: false,
+            refetchOnReconnect: false,
+          },
+        },
+      }),
+  )
   const [user, setUser] = useState<User | null>(null)
   const [loading, setLoading] = useState(true)
   const [sessionChecked, setSessionChecked] = useState(false)

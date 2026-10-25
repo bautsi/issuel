@@ -1,9 +1,14 @@
 import { useEffect } from 'react'
-import { useInfiniteQuery, useQueryClient } from '@tanstack/react-query'
+import {
+  useInfiniteQuery,
+  useIsFetching,
+  useQueryClient,
+} from '@tanstack/react-query'
+import type { QueryFunctionContext } from '@tanstack/react-query'
 import { defaultStatuses, fetchIssuePage, IssueReadError } from '@/lib/issues'
-import type { ClosedIssueStatus } from '@/lib/issues'
+import type { ClosedIssueStatus, IssuePage } from '@/lib/issues'
 
-/** Isolate each Closed reason's search cache from label-based pages and other groups. */
+/** Keep accepted pages and pagination errors separate from unsuccessful list refreshes. */
 export function useIssues(
   userId: string,
   repositoryId: number,
@@ -32,15 +37,26 @@ export function useIssues(
       direction: 'desc',
     },
   ] as const
+  const refreshKey = [...queryKey, 'refresh'] as const
   const previousError = client.getQueryState(queryKey)?.error
-  const query = useInfiniteQuery({
+  const previousRefreshError = client.getQueryState(refreshKey)?.error
+  const isRefreshing = useIsFetching({ queryKey: refreshKey, exact: true }) > 0
+  const options = {
     queryKey,
-    queryFn: ({ pageParam, signal }) => {
-      if (
-        previousError instanceof IssueReadError &&
-        previousError.retryAt > Date.now()
-      )
-        throw previousError
+    queryFn: async (
+      context: QueryFunctionContext<typeof queryKey | typeof refreshKey, number>,
+    ) => {
+      // Let StrictMode's synchronous remount reuse the request before consuming its abort signal.
+      await Promise.resolve()
+      const { pageParam, signal } = context
+      const errors =
+        context.queryKey.length === refreshKey.length
+          ? [previousError, previousRefreshError]
+          : [previousError]
+      for (const error of errors) {
+        if (error instanceof IssueReadError && error.retryAt > Date.now())
+          throw error
+      }
       return fetchIssuePage(
         userId,
         repositoryId,
@@ -52,7 +68,7 @@ export function useIssues(
       )
     },
     initialPageParam: 1,
-    getNextPageParam: (lastPage) => lastPage.nextPage ?? undefined,
+    getNextPageParam: (lastPage: IssuePage) => lastPage.nextPage ?? undefined,
     enabled,
     staleTime: Infinity,
     gcTime: Infinity,
@@ -61,7 +77,8 @@ export function useIssues(
     refetchOnMount: false,
     refetchOnWindowFocus: false,
     refetchOnReconnect: false,
-  })
+  }
+  const query = useInfiniteQuery(options)
   const { hasNextPage, isFetching, isError, isPaused, fetchNextPage } = query
   const loadedPages = query.data?.pages.length ?? 0
 
@@ -71,6 +88,7 @@ export function useIssues(
       enabled &&
       hasNextPage &&
       !isFetching &&
+      !isRefreshing &&
       !isError &&
       !isPaused
     ) {
@@ -81,11 +99,29 @@ export function useIssues(
     enabled,
     hasNextPage,
     isFetching,
+    isRefreshing,
     isError,
     isPaused,
     fetchNextPage,
     loadedPages,
   ])
 
-  return query
+  /** Stage new pages separately so failed refreshes preserve accepted data and pagination state. */
+  async function refresh() {
+    await client.cancelQueries({ queryKey, exact: true })
+    const data = await client.fetchInfiniteQuery({
+      ...options,
+      queryKey: refreshKey,
+      staleTime: 0,
+      // Open refresh follows every new page; Closed refresh only revalidates its loaded depth.
+      pages: state === 'open' ? Infinity : Math.max(1, loadedPages),
+    })
+    // A workspace may remount while the staged read is running; cancel any resumed old pagination.
+    await client.cancelQueries({ queryKey, exact: true })
+    client.setQueryData(queryKey, data)
+    client.removeQueries({ queryKey: refreshKey, exact: true })
+    return data
+  }
+
+  return { ...query, refresh, isRefreshing }
 }

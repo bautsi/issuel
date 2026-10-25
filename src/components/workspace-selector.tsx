@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
+import { useQueryClient } from '@tanstack/react-query'
 import {
   Link,
   Navigate,
@@ -10,6 +11,7 @@ import {
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Workspace } from '@/components/workspace'
+import { IssueReadError } from '@/lib/issues'
 
 type Repository = {
   id: number
@@ -19,7 +21,7 @@ type Repository = {
   private: boolean
 }
 
-/** Translate discovery and navigation without restarting repository verification on language changes. */
+/** Resolve routes from a shared user-scoped discovery cache; protected reads still verify access. */
 export function WorkspaceSelector({
   userId,
   onSessionExpired,
@@ -28,6 +30,7 @@ export function WorkspaceSelector({
   onSessionExpired: () => void
 }) {
   const { t } = useTranslation()
+  const client = useQueryClient()
   const location = useLocation()
   const navigate = useNavigate()
   const match = useMatch('/workspace/:owner/:repo')
@@ -69,7 +72,7 @@ export function WorkspaceSelector({
   useEffect(() => {
     let controller: AbortController | undefined
 
-    /** Recheck access on navigation and explicit refresh; discard older requests. */
+    /** Reuse discovery across navigation and discard obsolete route resolutions. */
     async function loadRepositories() {
       controller?.abort()
       controller = new AbortController()
@@ -77,43 +80,99 @@ export function WorkspaceSelector({
       setLoading(true)
       setError(null)
       try {
-        const path =
-          owner && name
-            ? `/api/workspaces/${encodeURIComponent(owner)}/${encodeURIComponent(name)}${historyId ? `?repositoryId=${encodeURIComponent(historyId)}` : ''}`
-            : '/api/repositories'
-        const response = await fetch(path, { signal, cache: 'no-store' })
-        const data = await response.json()
+        const discovery = await client.fetchQuery({
+          queryKey: ['github', userId, 'repositories'],
+          staleTime: Infinity,
+          gcTime: Infinity,
+          queryFn: async () => {
+            const response = await fetch('/api/repositories', {
+              cache: 'no-store',
+            })
+            const data = await response.json()
+            if (response.status === 401)
+              throw new IssueReadError(
+                'Your session has expired. Connect GitHub again.',
+                401,
+              )
+            if (!response.ok) {
+              const messages: Record<string, string> = {
+                github_forbidden:
+                  'GitHub denied repository access. Check the App permissions and organization approval, then retry.',
+                github_not_found:
+                  'A GitHub installation is no longer accessible. Check App access, then retry.',
+                github_rate_limited:
+                  'GitHub rate limit reached. Please wait before retrying.',
+                auth_not_configured:
+                  'GitHub authentication is not configured on the server.',
+                refresh_in_progress:
+                  'Your session is being refreshed. Please retry shortly.',
+              }
+              throw new IssueReadError(
+                messages[data.error] ??
+                  'Unable to load repositories from GitHub. Please retry shortly.',
+                response.status,
+                Number(response.headers.get('Retry-After')) || 0,
+              )
+            }
+            if (data.userId !== userId || !Array.isArray(data.repositories)) {
+              throw new IssueReadError(
+                'Your GitHub session changed. Connect GitHub again.',
+                401,
+              )
+            }
+            return data as {
+              userId: string
+              repositories: Repository[]
+              installationUrl: string | null
+              installationNotice: string | null
+            }
+          },
+        })
         if (signal.aborted) return
-        if (response.status === 401) {
-          onSessionExpired()
-          return
+        const repository =
+          owner && name
+            ? (discovery.repositories.find((item) =>
+                historyId
+                  ? String(item.id) === historyId
+                  : item.full_name.toLowerCase() === `${owner}/${name}`.toLowerCase(),
+              ) ?? null)
+            : null
+        let data = { ...discovery, repository }
+        // Unknown name-only links still use the server's rename resolution and access check.
+        if (owner && name && !historyId && !repository) {
+          data = await client.fetchQuery({
+            queryKey: ['github', userId, 'workspace', owner, name],
+            staleTime: Infinity,
+            gcTime: Infinity,
+            queryFn: async () => {
+              const response = await fetch(
+                `/api/workspaces/${encodeURIComponent(owner)}/${encodeURIComponent(name)}`,
+                { cache: 'no-store' },
+              )
+              const data = await response.json()
+              if (
+                !response.ok &&
+                !(response.status === 404 && data.error === 'workspace_not_found')
+              )
+                throw new IssueReadError(
+                  response.status === 429
+                    ? 'GitHub rate limit reached. Please wait before retrying.'
+                    : 'Unable to load repositories from GitHub. Please retry shortly.',
+                  response.status,
+                )
+              if (data.userId !== userId)
+                throw new IssueReadError(
+                  'Your GitHub session changed. Connect GitHub again.',
+                  401,
+                )
+              if (!Array.isArray(data.repositories))
+                throw new Error('Unable to load repositories. Please retry.')
+              return data as typeof discovery & { repository: Repository | null }
+            },
+          })
+          client.setQueryData(['github', userId, 'repositories'], data)
         }
-        if (
-          !response.ok &&
-          !(response.status === 404 && data.error === 'workspace_not_found')
-        ) {
-          const messages: Record<string, string> = {
-            github_forbidden:
-              'GitHub denied repository access. Check the App permissions and organization approval, then retry.',
-            github_not_found:
-              'A GitHub installation is no longer accessible. Check App access, then retry.',
-            github_rate_limited:
-              'GitHub rate limit reached. Please wait before retrying.',
-            auth_not_configured:
-              'GitHub authentication is not configured on the server.',
-            refresh_in_progress:
-              'Your session is being refreshed. Please retry shortly.',
-          }
-          throw new Error(
-            messages[data.error] ??
-              'Unable to load repositories from GitHub. Please retry shortly.',
-          )
-        }
-        if (data.userId !== userId || !Array.isArray(data.repositories)) {
-          throw new Error(
-            'Your GitHub session changed. Reload the page to continue.',
-          )
-        }
+        if (signal.aborted) return
         setRepositories(data.repositories)
         setInstallationUrl(data.installationUrl)
         setInstallationNotice(data.installationNotice)
@@ -162,6 +221,14 @@ export function WorkspaceSelector({
           }
         }
       } catch (failure) {
+        if (
+          !signal.aborted &&
+          failure instanceof IssueReadError &&
+          failure.status === 401
+        ) {
+          onSessionExpired()
+          return
+        }
         if (!signal.aborted)
           setError(
             failure instanceof Error
@@ -182,6 +249,7 @@ export function WorkspaceSelector({
     }
   }, [
     userId,
+    client,
     storageKey,
     revision,
     onSessionExpired,
@@ -199,7 +267,7 @@ export function WorkspaceSelector({
     repository.full_name.toLowerCase().includes(search.trim().toLowerCase()),
   )
 
-  /** Navigate to an accessible repository; the server verifies it again before rendering. */
+  /** Navigate by stable repository identity while reusing already loaded issue queries. */
   function selectRepository(repository: Repository) {
     if (
       loading ||
@@ -216,9 +284,17 @@ export function WorkspaceSelector({
     )
   }
 
-  /** Hide the old access list while requesting a complete fresh snapshot. */
-  function refreshRepositories() {
+  /** Invalidate only discovery and name resolution, preserving every repository's issue cache. */
+  async function refreshRepositories() {
+    if (pending) return
     setLoading(true)
+    await Promise.all([
+      client.invalidateQueries({
+        queryKey: ['github', userId, 'repositories'],
+        exact: true,
+      }),
+      client.invalidateQueries({ queryKey: ['github', userId, 'workspace'] }),
+    ])
     setRevision((current) => current + 1)
   }
 
