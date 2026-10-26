@@ -7,8 +7,11 @@ import {
 import type { QueryFunctionContext } from '@tanstack/react-query'
 import { defaultStatuses, fetchIssuePage, IssueReadError } from '@/lib/issues'
 import type { ClosedIssueStatus, IssuePage } from '@/lib/issues'
+import { getIssueStatus } from '@/lib/issues'
+import type { IssueDetail } from '@/lib/use-issue-detail'
+import { requestIssueRead } from '@/lib/use-issue-detail'
 
-/** Keep accepted pages and pagination errors separate from unsuccessful list refreshes. */
+/** Keep independent pages while reconciling delayed Search results against accepted detail responses. */
 export function useIssues(
   userId: string,
   repositoryId: number,
@@ -57,7 +60,7 @@ export function useIssues(
         if (error instanceof IssueReadError && error.retryAt > Date.now())
           throw error
       }
-      return fetchIssuePage(
+      const page = await fetchIssuePage(
         userId,
         repositoryId,
         state,
@@ -66,6 +69,52 @@ export function useIssues(
         signal,
         closedCategory,
       )
+      // Recent successful mutations bridge Search indexing delay without seeding fake pages.
+      const writes = client.getMutationCache().getAll().filter((mutation) => {
+        const key = mutation.options.mutationKey
+        return key?.[0] === 'github' && key[1] === userId && key[2] === repositoryId &&
+          key[3] === 'write' && mutation.state.status === 'success'
+      }).map((mutation) => mutation.state.data as IssueDetail)
+      const numbers = [...new Set(writes.map((issue) => issue.number))]
+      if (pageParam === 1) {
+        // Refresh only recently written resources, so another user's later edit is respected too.
+        await Promise.all(numbers.map((number) => client.fetchQuery({
+          queryKey: ['github', userId, repositoryId, 'issue', number],
+          staleTime: 0,
+          retry: false,
+          queryFn: async ({ signal }): Promise<IssueDetail> => {
+            const data = await requestIssueRead(`/api/repositories/${repositoryId}/issues/${number}`, signal)
+            if (data?.userId !== userId)
+              throw new IssueReadError('Your GitHub session changed. Connect GitHub again.', 401)
+            if (data.repositoryId !== repositoryId || data.issue?.number !== number)
+              throw new IssueReadError('The server returned invalid issue content.', 502)
+            return data.issue
+          },
+        })))
+      }
+      const known = numbers.flatMap((number) => {
+        const issue = client.getQueryData<IssueDetail>(['github', userId, repositoryId, 'issue', number])
+        return issue ? [issue] : []
+      })
+      const latest = new Map(known.map((issue) => [issue.id, issue]))
+      const issues = page.issues.map((issue) => {
+        const detail = latest.get(issue.id)
+        return detail && detail.updated_at >= issue.updated_at ? detail : issue
+      }).filter((issue) => issue.state === state &&
+        (!closedCategory || getIssueStatus(issue).status === closedCategory))
+      if (pageParam === 1) {
+        for (const issue of known) {
+          if (issue.state === state && (!closedCategory || getIssueStatus(issue).status === closedCategory) &&
+            !page.issues.some((item) => item.id === issue.id)) issues.push(issue)
+        }
+      }
+      const searchPending = page.searchPending || (state === 'closed' && (
+        issues.length !== page.issues.length || issues.some((issue, index) =>
+          issue.id !== page.issues[index]?.id || issue.updated_at !== page.issues[index]?.updated_at ||
+          issue.state_reason !== page.issues[index]?.state_reason,
+        )
+      ))
+      return { ...page, issues, searchPending }
     },
     initialPageParam: 1,
     getNextPageParam: (lastPage: IssuePage) => lastPage.nextPage ?? undefined,

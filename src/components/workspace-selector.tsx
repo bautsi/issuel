@@ -20,6 +20,8 @@ type Repository = {
   full_name: string
   owner: string
   private: boolean
+  permissions: Record<string, boolean>
+  installations: { id: number; permissions: Record<string, string> }[]
 }
 
 /** Reuse known repository metadata immediately while keeping detail loading stable. */
@@ -568,6 +570,8 @@ export function WorkspaceSelector({
               owner: owner ?? '',
               name: name ?? '',
               full_name: `${owner}/${name}`,
+              permissions: {},
+              installations: [],
             }}
             number={Number(issueNumber)}
             onSessionExpired={onSessionExpired}

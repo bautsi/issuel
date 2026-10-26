@@ -93,6 +93,7 @@ export async function fetchIssuePage(
     data.perPage !== perPage ||
     !Array.isArray(data.issues) ||
     typeof data.searchLimited !== 'boolean' ||
+    typeof data.searchPending !== 'boolean' ||
     (reason &&
       data.issues.some(
         (issue: Issue) =>

@@ -5,7 +5,7 @@ import type { ClosedIssueStatus } from './issue-status.ts'
 type IssueLabel = { id: number | null; name: string; color: string | null }
 type IssueUser = { id: number; login: string }
 
-/** Search each Closed reason independently and reject incomplete or semantically mismatched results. */
+/** Search Closed reasons independently, rejecting incomplete data and flagging stale index membership. */
 export async function readIssues(
   accessToken: string,
   repository: { id: number; full_name: string },
@@ -71,6 +71,7 @@ export async function readIssues(
   if (!Array.isArray(records) || records.length > perPage)
     throw new RepositoryError('github_invalid_response', 502)
   const issues = []
+  let searchPending = false
   for (const record of records) {
     const item = record as Record<string, unknown>
     if (!item || typeof item !== 'object' || Array.isArray(item)) {
@@ -82,12 +83,16 @@ export async function readIssues(
     }
     if (
       reason &&
-      (item.state_reason !== reason ||
-        typeof item.repository_url !== 'string' ||
+      (typeof item.repository_url !== 'string' ||
         item.repository_url.toLowerCase() !==
           `https://api.github.com/repos/${repository.full_name}`.toLowerCase())
     ) {
       throw new RepositoryError('github_search_mismatch', 502)
+    }
+    // Search can still select the old group after a successful close or reopen.
+    if (reason && (item.state !== state || item.state_reason !== reason)) {
+      searchPending = true
+      continue
     }
     if (
       typeof item.id !== 'number' ||
@@ -202,5 +207,6 @@ export async function readIssues(
     nextPage,
     category: category ?? null,
     searchLimited: reason !== null && totalCount > 1000,
+    searchPending,
   }
 }

@@ -41,7 +41,7 @@ export const defaultStatuses = [
     title: 'Canceled',
     state: 'closed',
     reason: 'not_planned',
-    label: 'status:canceled',
+    label: null,
     defaultExpanded: false,
   },
   {
@@ -49,7 +49,7 @@ export const defaultStatuses = [
     title: 'Duplicate',
     state: 'closed',
     reason: 'duplicate',
-    label: 'status:duplicate',
+    label: null,
     defaultExpanded: false,
   },
 ] as const
@@ -68,7 +68,7 @@ export function getIssueStatus<Label extends { name: string }>(issue: {
 }) {
   const mapped = defaultStatuses.filter(
     (status) =>
-      status.label !== null &&
+      status.state === 'open' && status.label !== null &&
       issue.labels.some((label) => label.name.toLowerCase() === status.label),
   )
   const labels = issue.labels.filter(
@@ -83,7 +83,7 @@ export function getIssueStatus<Label extends { name: string }>(issue: {
     const status: IssueStatus | 'conflict' = closed?.id ?? 'conflict'
     return { status, labels, conflictingLabels: [] as string[] }
   }
-  // A leftover terminal label cannot close an Open issue; multiple mapped labels need attention.
+  // Only Open mappings participate; Closed reasons are native GitHub state.
   const candidates = mapped
   const status: IssueStatus | 'conflict' =
     candidates.length > 1

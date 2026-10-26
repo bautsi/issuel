@@ -11,6 +11,7 @@ import {
   SelectValue,
 } from '@/components/ui/select'
 import { Skeleton } from '@/components/ui/skeleton'
+import { NewIssue } from '@/components/new-issue'
 import {
   Tooltip,
   TooltipContent,
@@ -215,7 +216,7 @@ function IssueRow({ issue }: { issue: Issue }) {
   )
 }
 
-/** Preserve list choices, pages and scroll position when returning from a detail or another workspace. */
+/** Preserve grouped pages and navigation state while offering creation to authorized writers. */
 export function Workspace({
   userId,
   repository,
@@ -223,7 +224,11 @@ export function Workspace({
   scrollPositions,
 }: {
   userId: string
-  repository: { id: number; full_name: string; private: boolean }
+  repository: {
+    id: number; full_name: string; private: boolean
+    permissions: Record<string, boolean>
+    installations: { permissions: Record<string, string> }[]
+  }
   onSessionExpired: () => void
   scrollPositions: RefObject<Map<number, number>>
 }) {
@@ -233,6 +238,9 @@ export function Workspace({
     window.scrollTo(0, positions.get(repository.id) ?? 0)
     return () => { positions.set(repository.id, window.scrollY) }
   }, [repository.id, scrollPositions])
+  const canWrite = repository.permissions.push && repository.installations.some(
+    (installation) => installation.permissions.issues === 'write',
+  )
   const [stored, setStored] = useState(() =>
     readWorkspacePreferences(userId, repository.id),
   )
@@ -378,6 +386,9 @@ export function Workspace({
         </p>
       </header>
 
+      {/* Read-only repositories do not offer write controls */}
+      {!canWrite && <p className="mt-3 text-xs text-muted-foreground">{t('Writing requires repository push access and App Issues write permission. Check access in GitHub.')}</p>}
+
       {/* List settings and Open loading progress */}
       <section
         aria-labelledby="issues-heading"
@@ -388,6 +399,9 @@ export function Workspace({
             {t('Issues')}
           </h2>
           <div className="flex flex-wrap items-center gap-2">
+            {/* Issue creation requires both user and App write access */}
+            {canWrite && <NewIssue userId={userId} repositoryId={repository.id} onSessionExpired={onSessionExpired} />}
+
             <Button
               variant="outline"
               aria-label={t(listRefreshing ? 'Refreshing…' : 'Refresh issues')}
@@ -567,10 +581,13 @@ export function Workspace({
             const expanded = stored.preferences.expandedGroups[group.id]
             const searchLimited =
               query.data?.pages.some((page) => page.searchLimited) ?? false
+            const searchPending =
+              query.data?.pages.some((page) => page.searchPending) ?? false
             const complete =
               !!query.data &&
               !query.hasNextPage &&
               !query.isError &&
+              !searchPending &&
               !searchLimited
             return (
               <section
@@ -662,6 +679,8 @@ export function Workspace({
                     {/* Only this Closed group's query advances when its pagination row is clicked */}
                     {closedGroup && (
                       <>
+                        {searchPending && <p role="status" className="border-t px-4 py-3 text-xs text-muted-foreground">{t('GitHub search is catching up. Confirmed changes are retained; refresh later to revalidate this group.')}</p>}
+
                         {searchLimited && (
                           <p
                             role="status"

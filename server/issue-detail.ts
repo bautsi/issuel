@@ -39,6 +39,17 @@ async function readIssue(accessToken: string, repositoryId: number, number: numb
 export async function readIssueDetail(accessToken: string, repositoryId: number, number: number) {
   const item = await readIssue(accessToken, repositoryId, number)
   const { data } = await githubResponse(`/repositories/${repositoryId}`, accessToken)
+  return projectIssueDetail(item, data, repositoryId, number)
+}
+
+/** Validate reads and write responses identically without replacing the returned GitHub issue. */
+export function projectIssueDetail(
+  record: unknown, data: unknown, repositoryId: number, number: number,
+) {
+  if (!record || typeof record !== 'object' || Array.isArray(record) ||
+    'pull_request' in record || !data || typeof data !== 'object' || Array.isArray(data))
+    throw new RepositoryError('github_invalid_response', 502)
+  const item = record as Record<string, unknown>
   const repository = data as Record<string, unknown>
   if (
     repository.id !== repositoryId ||

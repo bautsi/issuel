@@ -17,6 +17,7 @@ import {
 } from './repositories.ts'
 import { readIssues } from './issues.ts'
 import { readIssueComments, readIssueDetail } from './issue-detail.ts'
+import { createIssue, updateIssue } from './issue-writes.ts'
 import { defaultStatuses } from './issue-status.ts'
 import { githubFetch } from './logging.ts'
 
@@ -271,7 +272,7 @@ async function githubUser(accessToken: string) {
   }
 }
 
-/** Mount authentication, authorized repository reads and origin protection with one SQLite connection. */
+/** Mount authentication and authorized issue reads/writes with shared session and origin protection. */
 export function createAuth() {
   const app = new Hono()
   let config: Config | null = null
@@ -628,7 +629,7 @@ export function createAuth() {
   })
 
   app.on(
-    'GET',
+    ['GET', 'POST', 'PATCH'],
     [
       '/auth/session',
       '/repositories',
@@ -638,6 +639,11 @@ export function createAuth() {
       '/repositories/:repositoryId/issues/:number/comments',
     ],
     async (c) => {
+      const writing = c.req.method !== 'GET'
+      if (writing && !(
+        (c.req.method === 'POST' && /^\/api\/repositories\/[1-9]\d*\/issues$/.test(c.req.path)) ||
+        (c.req.method === 'PATCH' && /^\/api\/repositories\/[1-9]\d*\/issues\/[1-9]\d*$/.test(c.req.path))
+      )) return c.json({ error: 'Not found' }, 404)
       if (!config) throw new AuthError('auth_not_configured')
       const id = cookieId(c, sessionCookie)
       if (!id) {
@@ -653,6 +659,8 @@ export function createAuth() {
         clearCookie(c, sessionCookie)
         return c.json({ error: 'unauthorized' }, 401)
       }
+      if (writing && c.req.header('X-Issuel-User') !== session.github_user_id)
+        return c.json({ error: 'session_changed' }, 401)
       try {
         const token = await accessToken(session)
         const owner = c.req.param('owner')
@@ -691,7 +699,7 @@ export function createAuth() {
             )
           )
             return c.json({ error: 'invalid_issue_parameters' }, 400)
-          const discovery = await repositoriesForSession(idHash, token, false)
+          const discovery = await repositoriesForSession(idHash, token, writing)
           const repository = discovery.repositories.find(
             (item) => String(item.id) === repositoryId,
           )
@@ -703,7 +711,21 @@ export function createAuth() {
           ) {
             return c.json({ error: 'github_forbidden' }, 403)
           }
-          if (issueNumber !== undefined) {
+          if (writing) {
+            if (!repository.permissions.push || !repository.installations.some(
+              (installation) => installation.permissions.issues === 'write',
+            )) return c.json({ error: 'issues_write_required' }, 403)
+            if (!c.req.header('Content-Type')?.startsWith('application/json'))
+              return c.json({ error: 'invalid_issue_write' }, 400)
+            const input: unknown = await c.req.json().catch(() => null)
+            result = {
+              issue: issueNumber === undefined
+                ? await createIssue(token, repository.id, input)
+                : await updateIssue(token, repository.id, Number(issueNumber), input),
+              userId: session.github_user_id,
+              repositoryId: repository.id,
+            }
+          } else if (issueNumber !== undefined) {
             if (c.req.path.endsWith('/comments')) {
               result = {
                 ...(await readIssueComments(

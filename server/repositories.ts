@@ -18,13 +18,13 @@ type GitHubRepository = {
 
 /** Carry sanitized GitHub discovery failures without exposing provider response bodies. */
 export class RepositoryError extends Error {
-  status: 401 | 403 | 404 | 429 | 502 | 503
+  status: 400 | 401 | 403 | 404 | 409 | 422 | 429 | 502 | 503
   retryAfter?: number
 
   /** Preserve only a public code, HTTP status and optional retry delay. */
   constructor(
     code: string,
-    status: 401 | 403 | 404 | 429 | 502 | 503,
+    status: 400 | 401 | 403 | 404 | 409 | 422 | 429 | 502 | 503,
     retryAfter?: number,
   ) {
     super(code)
@@ -33,14 +33,21 @@ export class RepositoryError extends Error {
   }
 }
 
-/** Trace GitHub API attempts while classifying authorization, limits and outages. */
-export async function githubResponse(path: string, accessToken: string) {
+/** Trace GitHub reads and single-attempt writes, retaining only sanitized failures. */
+export async function githubResponse(
+  path: string,
+  accessToken: string,
+  write?: { method: 'POST' | 'PATCH'; body: Record<string, unknown> },
+) {
   let response: Response
   try {
     let url = new URL(path, 'https://api.github.com')
     for (let redirects = 0; ; redirects++) {
       response = await githubFetch(url, {
+        method: write?.method ?? 'GET',
+        body: write ? JSON.stringify(write.body) : undefined,
         headers: {
+          ...(write ? { 'Content-Type': 'application/json' } : {}),
           Accept: 'application/vnd.github+json',
           Authorization: `Bearer ${accessToken}`,
           'X-GitHub-Api-Version': '2026-03-10',
@@ -51,6 +58,8 @@ export async function githubResponse(path: string, accessToken: string) {
         cache: 'no-store',
       })
       if (![301, 302, 307, 308].includes(response.status)) break
+      // Never replay a non-idempotent request after a redirect.
+      if (write) throw new Error('Write redirected')
       const location = response.headers.get('location')
       if (!location || redirects >= 3) throw new Error('Invalid redirect')
       url = new URL(location, url)
@@ -63,7 +72,7 @@ export async function githubResponse(path: string, accessToken: string) {
       }
     }
   } catch {
-    throw new RepositoryError('github_unavailable', 503)
+    throw new RepositoryError(write ? 'github_write_uncertain' : 'github_unavailable', 503)
   }
   const body: unknown = await response.json().catch(() => null)
   const data =
@@ -98,6 +107,12 @@ export async function githubResponse(path: string, accessToken: string) {
     throw new RepositoryError('github_forbidden', 403)
   if (response.status === 404)
     throw new RepositoryError('github_not_found', 404)
+  if (response.status === 409)
+    throw new RepositoryError('github_write_conflict', 409)
+  if (response.status === 422)
+    throw new RepositoryError('github_write_rejected', 422)
+  if (write && !response.ok)
+    throw new RepositoryError('github_write_uncertain', 503)
   if (!response.ok) throw new RepositoryError('github_unavailable', 503)
   if (!body || typeof body !== 'object') {
     throw new RepositoryError('github_invalid_response', 502)

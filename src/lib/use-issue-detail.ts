@@ -10,7 +10,7 @@ type CommentsPage = Awaited<ReturnType<typeof readIssueComments>> & {
 }
 
 /** Translate protected read failures without retaining provider bodies or credentials. */
-async function requestIssueRead(path: string, signal: AbortSignal) {
+export async function requestIssueRead(path: string, signal: AbortSignal) {
   let response: Response
   try {
     response = await fetch(path, { signal, cache: 'no-store' })
