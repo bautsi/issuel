@@ -7,7 +7,7 @@ import {
   SelectValue,
 } from '@/components/ui/select'
 
-/** Switch the app language from a compact globe menu without remounting the workspace. */
+/** Switch the app language from a globe-only trigger without remounting the workspace. */
 export function LanguageSelect() {
   const { t, i18n } = useTranslation()
   return (
@@ -17,7 +17,7 @@ export function LanguageSelect() {
     >
       <SelectTrigger
         aria-label={t('Language')}
-        className="size-8 justify-center gap-0 border-transparent bg-transparent p-0 shadow-none [&>span:last-child]:hidden"
+        className="size-8 justify-center gap-0 border-transparent bg-transparent p-0 shadow-none [&>svg:last-child]:hidden"
       >
         <svg
           aria-hidden="true"

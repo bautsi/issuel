@@ -69,3 +69,68 @@
     transform: translateX(200%);
   }
 }
+
+/* Keep remote Markdown readable without letting wide code or tables expand the page. */
+.issue-markdown {
+  overflow-wrap: anywhere;
+}
+
+.issue-markdown > :first-child { margin-top: 0; }
+.issue-markdown > :last-child { margin-bottom: 0; }
+.issue-markdown :is(p, ul, ol, pre, blockquote, table, hr) { margin-block: 1em; }
+.issue-markdown :is(h1, h2, h3, h4, h5, h6) {
+  margin-block: 1.5em 0.65em;
+  font-weight: 600;
+  line-height: 1.4;
+}
+.issue-markdown h1 { font-size: 1.65em; }
+.issue-markdown h2 { font-size: 1.4em; }
+.issue-markdown h3 { font-size: 1.2em; }
+.issue-markdown :is(ul, ol) { padding-left: 1.6em; }
+.issue-markdown ul { list-style: disc; }
+.issue-markdown ol { list-style: decimal; }
+.issue-markdown li > :is(ul, ol) { margin-block: 0.3em; }
+.issue-markdown .task-list-item { list-style: none; }
+.issue-markdown input[type='checkbox'] { margin-left: -1.4em; margin-right: 0.6em; accent-color: #a78bfa; }
+.issue-markdown a { color: #a5b4fc; text-decoration: underline; text-underline-offset: 3px; }
+.issue-markdown a:focus-visible { outline: 2px solid var(--ring); outline-offset: 3px; }
+.issue-markdown blockquote { border-left: 3px solid var(--border); padding-left: 1em; color: var(--muted-foreground); }
+.issue-markdown code { border-radius: 0.3rem; background: var(--muted); padding: 0.15em 0.35em; font-size: 0.85em; }
+.issue-markdown pre { max-width: 100%; overflow-x: auto; border: 1px solid var(--border); border-radius: 0.5rem; background: var(--card); padding: 1em; }
+.issue-markdown pre code { background: transparent; padding: 0; overflow-wrap: normal; white-space: pre; }
+
+/* Scope syntax colors to fenced code; inline code keeps its existing appearance. */
+.issue-markdown pre :is(.hljs-comment, .hljs-quote) {
+  color: #8b949e;
+}
+.issue-markdown pre :is(.hljs-keyword, .hljs-doctag, .hljs-selector-tag, .hljs-tag .hljs-name) {
+  color: #ff7b72;
+}
+.issue-markdown pre :is(.hljs-string, .hljs-regexp, .hljs-meta .hljs-string) {
+  color: #a5d6ff;
+}
+.issue-markdown pre :is(.hljs-title, .hljs-section, .hljs-selector-id, .hljs-selector-class) {
+  color: #d2a8ff;
+}
+.issue-markdown pre :is(.hljs-number, .hljs-literal, .hljs-symbol, .hljs-bullet, .hljs-variable, .hljs-meta) {
+  color: #79c0ff;
+}
+.issue-markdown pre :is(.hljs-built_in, .hljs-type, .hljs-attr, .hljs-attribute) {
+  color: #ffa657;
+}
+.issue-markdown pre .hljs-addition {
+  color: #aff5b4;
+  background: #033a16;
+}
+.issue-markdown pre .hljs-deletion {
+  color: #ffdcd7;
+  background: #67060c;
+}
+.issue-markdown pre .hljs-emphasis { font-style: italic; }
+.issue-markdown pre .hljs-strong { font-weight: 700; }
+
+.issue-markdown img { max-width: 100%; height: auto; border-radius: 0.4rem; }
+.issue-markdown table { width: 100%; border-collapse: collapse; font-size: 0.9em; }
+.issue-markdown :is(th, td) { min-width: 6rem; border: 1px solid var(--border); padding: 0.5em 0.75em; }
+.issue-markdown th { background: var(--muted); text-align: left; }
+.issue-markdown hr { border-top: 1px solid var(--border); }

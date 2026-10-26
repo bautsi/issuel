@@ -347,3 +347,117 @@ Use a configured running server with a valid GitHub App session; the App install
 5. Force a later Open/Done page to fail or go offline after page 1. Earlier rows must remain, the list must say incomplete, and retry must target the failed page. Exercise a 429 response with `Retry-After`, ensuring no automatic request loop and no early retry request for that query. Reconnect may resume an already paused request; it must not refetch completed lists.
 6. Request the API without a session (401), with an inaccessible/nonexistent repository (404), and with an App installation lacking Issues permission (403). Removing repository access must prevent every later page from returning issues. Check actual GitHub 403/404, 5xx/network failure and session expiry/logout during a request where reproducible; raw GitHub error bodies must never appear in the API/UI.
 7. Run `pnpm lint`, `pnpm typecheck`, and `pnpm build`. No automated test framework or tests were added. Real pagination, session, permission and rate-limit acceptance still requires the configured App and suitable repository data.
+
+## Issue detail reading (ISL-7)
+
+Click an issue row to open `/workspace/:owner/:repo/issue/:number`. Direct links,
+reload and browser Back/Forward resolve the same repository and issue. Switching
+repositories opens that repository's list. Returning to a previously loaded list
+reuses its pages, sorting, group choices and in-memory scroll position; reading
+detail does not invalidate or refetch the entire list.
+
+The reading view separates title, mapped status, Markdown description and comment
+activity from the properties column. Properties include all labels, assignees,
+author, GitHub state/reason and creation/update/closure timestamps. Unknown status
+reasons remain mapping conflicts rather than being guessed to mean Done. No issue,
+label, assignee or comment editing controls are provided.
+
+### Protected read APIs
+
+| Endpoint | Result |
+| --- | --- |
+| `GET /api/repositories/:repositoryId/issues/:number` | Safe issue metadata and unchanged Markdown, plus canonical repository name/default branch for relative resources |
+| `GET /api/repositories/:repositoryId/issues/:number/comments?page=1&per_page=30` | One comments page with `page`, `perPage`, `nextPage` and safe author/date/Markdown/URL fields |
+
+Both endpoints use the existing server session, server-side GitHub user token,
+App-and-user repository discovery and Issues permission checks. The existing
+30-second per-session authorization snapshot is reused; the GitHub resource reads
+still enforce current upstream access. Every comments page also reads its parent
+issue to exclude PRs. After upstream reads, the session is checked again before
+returning content. Responses use `Cache-Control: no-store`. No issue data is saved
+in SQLite, IndexedDB or a server issue cache.
+
+The detail read uses the GitHub issue endpoint and repository metadata endpoint;
+the comments read uses the parent issue and comments endpoints. Every new upstream
+call is GET through the existing GitHub integration. Missing discovery access uses
+the non-disclosing repository-unavailable 404. An issue resource 404 or PR uses
+`issue_not_found`; the UI explicitly allows for removed access rather than claiming
+that a private resource exists. Existing sanitized 401/403/429/network/provider
+errors and `Retry-After` behavior are preserved.
+
+Comments load 30 at a time in the UI, with **Load more comments** and explicit
+partial counts. API page sizes are bounded at 100. Only a validated sequential
+GitHub `Link` next-page value advances pagination; a failed page remains retryable.
+Comments loading, empty results and errors do not block the description. No
+timeline events or fabricated history are added. See [GitHub comments documentation](https://docs.github.com/en/rest/issues/comments#list-issue-comments).
+
+### Markdown and cache behavior
+
+`react-markdown` renders Markdown as React elements; `remark-gfm` adds tables,
+strikethrough, task lists and autolinks. Raw HTML is skipped, task checkboxes are
+disabled, and URL handling rejects script/data/credential-bearing URLs. Links open
+with `noopener noreferrer`; images use HTTPS, lazy loading and no-referrer.
+Tables and fenced code scroll horizontally inside the reading column.
+
+Bare relative file/image paths resolve against the repository default branch.
+GitHub's issue/comment `../blob/REF/...` and cross-repository `../../../OWNER/REPO/...`
+forms resolve against the original issue/comment URL; image blob links are converted
+to raw resource URLs. Root-relative URLs use the GitHub origin, and fragment links
+open the original GitHub content. See [GitHub relative image examples](https://docs.github.com/en/get-started/writing-on-github/getting-started-with-writing-and-formatting-on-github/basic-writing-and-formatting-syntax#images).
+Private images may require the viewer's GitHub browser access; server tokens are
+never forwarded to image URLs. **Open in GitHub** remains available for inaccessible
+images and unsupported GitHub features such as HTML details/picture, mentions,
+issue-reference expansion, alerts, math and Mermaid. Fenced code supports
+syntax highlighting through `rehype-highlight` for its supported, explicitly marked
+languages, with a scoped dark palette. Unmarked or unsupported languages remain
+plain text; language auto-detection is disabled. Rendering never changes the original body.
+
+TanStack Query detail keys are `['github', userId, repositoryId, 'issue', number]`;
+comments append `'comments'`. Each detail mount requests fresh issue content and
+comments, including previously loaded comment pages. Correctly scoped cached data
+may appear with an explicit checking/cached notice. Failures never claim that old
+content is current. Query cancellation and distinct keys prevent late results
+from replacing another issue/repository. There is no polling, focus refetch,
+reconnect refetch or persistent issue cache. Rate-limited retries respect the
+recorded deadline without an automatic retry loop.
+
+### Verification and manual acceptance
+
+On 2026-10-25, `pnpm lint`, `pnpm typecheck`, `pnpm build` and `git diff --check`
+passed. Build reports a large JavaScript chunk warning. Inline checks with mocked
+GitHub responses verified unchanged Markdown/projection, all three Closed reasons,
+two comment pages, PR rejection, sanitized 403/404/429/network failures and GET-only
+upstream calls. Actual React server rendering verified required GFM elements,
+relative URLs, disabled tasks and rejected unsafe HTML/script URLs. These checks
+added no test files or test framework.
+
+Browser checks used an isolated, temporary preview with synthetic API data, not
+real authentication. They verified list-to-detail navigation, direct URL/reload,
+Back/Forward, fresh detail reads, comments pagination, empty description/comments,
+separate comments failure, repository switching, native Duplicate presentation,
+and a desktop long-code layout. A simulated 429 displayed the retry deadline;
+clicking Retry before that deadline left its request count unchanged.
+Preview request counters showed one Open-list request per repository through the
+exercised returns and detail navigation, and only GET API requests.
+
+For real acceptance with your configured App session:
+
+1. Click a list issue, copy its URL into a new tab and reload. Use Back/Forward and
+   **Back to issues**; confirm sorting, group expansion and loaded pages remain.
+2. Read headings, lists/tasks, tables, links/images and long fenced code. Check
+   desktop and narrow viewports, including private images via **Open in GitHub**.
+3. Open an issue with more than 30 comments and load the next page. Simulate a
+   comments failure; the description must remain readable. Check an empty issue.
+4. Change title/body/status on GitHub, then reopen detail. Watch the checking notice
+   and confirm fresh data; the list should retain its existing snapshot until its
+   normal explicit refresh. Compare Done/Canceled/Duplicate against native reasons.
+5. Switch issues/repositories while a request is delayed; old content must not
+   appear under the new identity. In Network, confirm list pages are reused and
+   reading sends no GitHub write requests or focus-driven refetch.
+6. Exercise a missing issue, PR URL, revoked repository/App permission, expired
+   session, rate limit and network failure. Retry must respect `Retry-After`.
+
+Real GitHub session/permission/rate-limit behavior, private image access, concurrent
+request races and narrow browser layout remain manual acceptance items. GitHub
+page-based comments are not an atomic snapshot during concurrent remote edits.
+Issue/comment CRUD, an editor and Markdown round-trip remain outside ISL-7.

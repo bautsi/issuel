@@ -1,13 +1,14 @@
 import { useCallback, useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import * as DropdownMenu from '@radix-ui/react-dropdown-menu'
 import { Button } from '@/components/ui/button'
 import { WorkspaceSelector } from '@/components/workspace-selector'
 import { LanguageSelect } from '@/components/language-select'
 
 type User = { id: string; login: string; name: string | null }
 
-/** Resolve authentication and offer a persistent app language beside the account actions. */
+/** Resolve authentication and offer language switching beside the avatar account menu. */
 export default function App() {
   const { t } = useTranslation()
   const [queryClient] = useState(
@@ -26,6 +27,7 @@ export default function App() {
   const [loading, setLoading] = useState(true)
   const [sessionChecked, setSessionChecked] = useState(false)
   const [loggingOut, setLoggingOut] = useState(false)
+  const [failedAvatarId, setFailedAvatarId] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [configured, setConfigured] = useState(true)
   const [callbackError] = useState(() =>
@@ -175,16 +177,53 @@ export default function App() {
         <header className="sticky top-0 z-20 flex min-h-14 flex-wrap items-center gap-3 border-b bg-background px-4 py-2">
           <span className="text-sm font-semibold tracking-tight">Issuel</span>
           <div className="ml-auto flex items-center gap-3">
+            {/* Language menu */}
             <LanguageSelect />
-            <span className="text-xs text-muted-foreground">@{user.login}</span>
-            <Button
-              onClick={logout}
-              disabled={loggingOut}
-              variant="outline"
-              className="h-8 text-xs"
-            >
-              {t(loggingOut ? 'Logging out…' : 'Logout')}
-            </Button>
+
+            {/* Avatar and account actions */}
+            <DropdownMenu.Root>
+              <DropdownMenu.Trigger asChild>
+                <button
+                  type="button"
+                  aria-label={loggingOut ? t('Logging out…') : `@${user.login}`}
+                  aria-busy={loggingOut}
+                  title={`@${user.login}`}
+                  disabled={loggingOut}
+                  className="relative inline-flex size-8 shrink-0 items-center justify-center rounded-full bg-muted p-0 outline-none ring-offset-2 ring-offset-background transition-shadow hover:ring-2 hover:ring-foreground/25 focus-visible:ring-2 focus-visible:ring-ring data-[state=open]:ring-2 data-[state=open]:ring-ring disabled:pointer-events-none disabled:opacity-50"
+                >
+                  <span aria-hidden="true" className="text-xs font-medium text-muted-foreground">
+                    {user.login.slice(0, 1).toUpperCase()}
+                  </span>
+                  {failedAvatarId !== user.id && (
+                    <img
+                      src={`https://avatars.githubusercontent.com/u/${encodeURIComponent(user.id)}?s=64`}
+                      alt=""
+                      className="absolute inset-0 size-full rounded-full object-cover"
+                      referrerPolicy="no-referrer"
+                      onError={() => setFailedAvatarId(user.id)}
+                    />
+                  )}
+                </button>
+              </DropdownMenu.Trigger>
+              <DropdownMenu.Portal>
+                <DropdownMenu.Content
+                  side="bottom"
+                  align="end"
+                  sideOffset={8}
+                  collisionPadding={8}
+                  aria-label={`@${user.login}`}
+                  className="z-50 min-w-36 rounded-md border bg-card p-1 text-card-foreground shadow-lg outline-none"
+                >
+                  <DropdownMenu.Item
+                    disabled={loggingOut}
+                    onSelect={() => void logout()}
+                    className="flex cursor-pointer select-none items-center rounded-sm px-3 py-2 text-xs outline-none data-[highlighted]:bg-accent data-[highlighted]:text-accent-foreground data-[disabled]:pointer-events-none data-[disabled]:opacity-50"
+                  >
+                    {t(loggingOut ? 'Logging out…' : 'Logout')}
+                  </DropdownMenu.Item>
+                </DropdownMenu.Content>
+              </DropdownMenu.Portal>
+            </DropdownMenu.Root>
           </div>
           {error && (
             <p role="alert" className="w-full text-sm text-destructive">

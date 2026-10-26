@@ -11,7 +11,7 @@ const requests = new AsyncLocalStorage<{
 function logTarget(input: string | URL) {
   const url = new URL(input)
   const pagination: Record<string, string> = {}
-  if (url.pathname.endsWith('/issues')) {
+  if (url.pathname.endsWith('/issues') || /\/issues\/[1-9]\d*\/comments$/.test(url.pathname)) {
     for (const name of ['page', 'per_page']) {
       const value = url.searchParams.get(name)
       if (value && /^[1-9]\d{0,15}$/.test(value)) pagination[name] = value

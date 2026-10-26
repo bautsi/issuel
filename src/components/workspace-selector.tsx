@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useQueryClient } from '@tanstack/react-query'
 import {
@@ -11,6 +11,7 @@ import {
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Workspace } from '@/components/workspace'
+import { IssueDetail } from '@/components/issue-detail'
 import { IssueReadError } from '@/lib/issues'
 
 type Repository = {
@@ -21,7 +22,7 @@ type Repository = {
   private: boolean
 }
 
-/** Resolve routes from a shared user-scoped discovery cache; protected reads still verify access. */
+/** Reuse known repository metadata immediately while keeping detail loading stable. */
 export function WorkspaceSelector({
   userId,
   onSessionExpired,
@@ -33,7 +34,13 @@ export function WorkspaceSelector({
   const client = useQueryClient()
   const location = useLocation()
   const navigate = useNavigate()
-  const match = useMatch('/workspace/:owner/:repo')
+  const listMatch = useMatch('/workspace/:owner/:repo')
+  const detailMatch = useMatch('/workspace/:owner/:repo/issue/:number')
+  const match = listMatch ?? detailMatch
+  const issueNumber = detailMatch?.params.number
+  const validIssueNumber = issueNumber !== undefined &&
+    /^[1-9]\d*$/.test(issueNumber) && Number.isSafeInteger(Number(issueNumber))
+  const scrollPositions = useRef(new Map<number, number>())
   const owner = match?.params.owner
   const name = match?.params.repo
   const historyId =
@@ -41,7 +48,7 @@ export function WorkspaceSelector({
     Number.isSafeInteger(location.state?.repositoryId)
       ? String(location.state.repositoryId)
       : undefined
-  const routeIdentity = JSON.stringify([location.pathname, historyId])
+  const routeIdentity = JSON.stringify([owner, name, historyId])
   const storageKey = `issuel:workspace:${userId}`
   const [preference] = useState(() => {
     try {
@@ -259,9 +266,18 @@ export function WorkspaceSelector({
     routeIdentity,
   ])
 
+  // Route changes can reuse discovered metadata before the asynchronous cache lookup settles.
   const selected =
-    !loading && !error
-      ? repositories.find((repository) => String(repository.id) === selectedId)
+    !error
+      ? repositories.find((repository) =>
+          owner && name
+            ? historyId
+              ? String(repository.id) === historyId
+              : repository.full_name.toLowerCase() === `${owner}/${name}`.toLowerCase()
+            : false,
+        ) ?? (!loading
+          ? repositories.find((repository) => String(repository.id) === selectedId)
+          : undefined)
       : undefined
   const filtered = repositories.filter((repository) =>
     repository.full_name.toLowerCase().includes(search.trim().toLowerCase()),
@@ -301,25 +317,22 @@ export function WorkspaceSelector({
   const workspacePath = selected
     ? `/workspace/${encodeURIComponent(selected.owner)}/${encodeURIComponent(selected.name)}`
     : null
-  if (
-    selected &&
-    workspacePath &&
-    (location.pathname === '/' ||
-      (match &&
-        (location.pathname !== workspacePath ||
-          historyId !== String(selected.id))))
-  ) {
-    return (
-      <Navigate
-        to={workspacePath}
-        replace
-        state={{ userId, repositoryId: selected.id }}
-      />
-    )
-  }
-
+  const canonicalPath = workspacePath && detailMatch
+    ? `${workspacePath}/issue/${issueNumber}`
+    : workspacePath
   return (
     <div className="grid min-h-[calc(100svh-3.5rem)] md:grid-cols-[13.5rem_minmax(0,1fr)]">
+      {/* Normalize history without replacing the workspace layout */}
+      {selected && canonicalPath &&
+        (location.pathname === '/' ||
+          (match && (location.pathname !== canonicalPath || historyId !== String(selected.id)))) && (
+          <Navigate
+            to={canonicalPath}
+            replace
+            state={{ userId, repositoryId: selected.id }}
+          />
+        )}
+
       {/* Persistent repository navigation */}
       <aside
         aria-labelledby="workspace-heading"
@@ -544,9 +557,22 @@ export function WorkspaceSelector({
         </div>
       </aside>
 
-      {/* Verify access before displaying repository content */}
-      <main className="min-w-0 p-5 sm:p-6 lg:p-8" aria-busy={loading}>
-        {loading ? (
+      {/* Reuse known repository metadata; protected issue reads still verify access */}
+      <main className="min-w-0 p-5 sm:p-6 lg:p-8" aria-busy={loading && !selected}>
+        {detailMatch && validIssueNumber && !error && (loading || selected) ? (
+          <IssueDetail
+            key={`${userId}:${owner}:${name}:${issueNumber}`}
+            userId={userId}
+            repository={selected ?? {
+              id: null,
+              owner: owner ?? '',
+              name: name ?? '',
+              full_name: `${owner}/${name}`,
+            }}
+            number={Number(issueNumber)}
+            onSessionExpired={onSessionExpired}
+          />
+        ) : loading && !selected ? (
           <div role="status">
             <span className="sr-only">{t('Loading workspace…')}</span>
             <div aria-hidden="true">
@@ -575,19 +601,20 @@ export function WorkspaceSelector({
           <h1 className="text-xl font-semibold">
             {t('Workspace unavailable')}
           </h1>
-        ) : location.pathname !== '/' && !match ? (
+        ) : (location.pathname !== '/' && !match) || (detailMatch && !validIssueNumber) ? (
           <div>
             <h1 className="text-xl font-semibold">{t('Page not found')}</h1>
             <Link to="/" className="mt-4 inline-block underline">
               {t('Choose a workspace')}
             </Link>
           </div>
-        ) : selected && match ? (
+        ) : selected && listMatch ? (
           <Workspace
             key={`${userId}:${selected.id}`}
             userId={userId}
             repository={selected}
             onSessionExpired={onSessionExpired}
+            scrollPositions={scrollPositions}
           />
         ) : (
           <div>

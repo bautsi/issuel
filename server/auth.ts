@@ -16,6 +16,7 @@ import {
   resolveWorkspace,
 } from './repositories.ts'
 import { readIssues } from './issues.ts'
+import { readIssueComments, readIssueDetail } from './issue-detail.ts'
 import { defaultStatuses } from './issue-status.ts'
 import { githubFetch } from './logging.ts'
 
@@ -633,6 +634,8 @@ export function createAuth() {
       '/repositories',
       '/workspaces/:owner/:repo',
       '/repositories/:repositoryId/issues',
+      '/repositories/:repositoryId/issues/:number',
+      '/repositories/:repositoryId/issues/:number/comments',
     ],
     async (c) => {
       if (!config) throw new AuthError('auth_not_configured')
@@ -655,6 +658,7 @@ export function createAuth() {
         const owner = c.req.param('owner')
         const repo = c.req.param('repo')
         const repositoryId = c.req.param('repositoryId')
+        const issueNumber = c.req.param('number')
         let result
         let status: 200 | 404 = 200
         if (repositoryId) {
@@ -671,6 +675,9 @@ export function createAuth() {
           if (
             !/^[1-9]\d*$/.test(repositoryId) ||
             !Number.isSafeInteger(Number(repositoryId)) ||
+            (issueNumber !== undefined &&
+              (!/^[1-9]\d*$/.test(issueNumber) ||
+                !Number.isSafeInteger(Number(issueNumber)))) ||
             (state !== 'open' && state !== 'closed') ||
             !/^[1-9]\d*$/.test(page) ||
             !Number.isSafeInteger(Number(page)) ||
@@ -696,21 +703,40 @@ export function createAuth() {
           ) {
             return c.json({ error: 'github_forbidden' }, 403)
           }
-          const issues = await readIssues(
-            token,
-            repository,
-            state,
-            Number(page),
-            Number(perPage),
-            state === 'closed' && category?.state === 'closed'
-              ? category.id
-              : undefined,
-          )
-          result = {
-            ...issues,
-            userId: session.github_user_id,
-            repositoryId: repository.id,
-            state,
+          if (issueNumber !== undefined) {
+            if (c.req.path.endsWith('/comments')) {
+              result = {
+                ...(await readIssueComments(
+                  token, repository.id, Number(issueNumber), Number(page), Number(perPage),
+                )),
+                userId: session.github_user_id,
+                repositoryId: repository.id,
+                number: Number(issueNumber),
+              }
+            } else {
+              result = {
+                issue: await readIssueDetail(token, repository.id, Number(issueNumber)),
+                userId: session.github_user_id,
+                repositoryId: repository.id,
+              }
+            }
+          } else {
+            const issues = await readIssues(
+              token,
+              repository,
+              state,
+              Number(page),
+              Number(perPage),
+              state === 'closed' && category?.state === 'closed'
+                ? category.id
+                : undefined,
+            )
+            result = {
+              ...issues,
+              userId: session.github_user_id,
+              repositoryId: repository.id,
+              state,
+            }
           }
         } else if ((owner && repo) || c.req.path.endsWith('/repositories')) {
           const discovery = await repositoriesForSession(

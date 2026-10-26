@@ -1,4 +1,6 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
+import type { RefObject } from 'react'
+import { Link, useLocation } from 'react-router'
 import { useTranslation } from 'react-i18next'
 import { Button } from '@/components/ui/button'
 import {
@@ -29,7 +31,7 @@ import {
 import type { WorkspacePreferences } from '@/lib/workspace-preferences'
 
 /** Use distinct progress fills for active statuses and compact terminal/conflict markers. */
-function StatusIcon({ status }: { status: IssueStatus | 'conflict' }) {
+export function StatusIcon({ status }: { status: IssueStatus | 'conflict' }) {
   const styles = {
     inProgress:
       'rounded-full border-2 border-yellow-400 bg-linear-to-r from-yellow-400 from-50% to-transparent to-50%',
@@ -60,9 +62,10 @@ function StatusIcon({ status }: { status: IssueStatus | 'conflict' }) {
   )
 }
 
-/** Compress labels in place and show non-hoverable title, assignee and date details below their triggers. */
+/** Open a repository-scoped detail while keeping compact status and metadata in the list row. */
 function IssueRow({ issue }: { issue: Issue }) {
   const { t, i18n } = useTranslation()
+  const location = useLocation()
   const mapped = getIssueStatus(issue)
   const statusName = t(
     mapped.status === 'conflict'
@@ -70,7 +73,7 @@ function IssueRow({ issue }: { issue: Issue }) {
       : groups.find((group) => group.id === mapped.status)!.title,
   )
   return (
-    <li className="flex h-11 min-w-0 items-center gap-2 border-t px-4 text-sm hover:bg-muted/30 focus-within:bg-muted/30 sm:gap-3">
+    <li className="relative flex h-11 min-w-0 items-center gap-2 border-t px-4 text-sm hover:bg-muted/30 focus-within:bg-muted/30 sm:gap-3">
       {/* Issue identity and vertically centered status */}
       <span className="flex shrink-0 items-center">
         <StatusIcon status={mapped.status} />
@@ -86,12 +89,14 @@ function IssueRow({ issue }: { issue: Issue }) {
       {/* The title owns remaining space and never pushes the metadata out of the row */}
       <Tooltip disableHoverableContent>
         <TooltipTrigger asChild>
-          <p
-            tabIndex={0}
-            className="min-w-4 flex-[1_1_auto] truncate rounded-sm font-medium leading-5 outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          <Link
+            to={`${location.pathname}/issue/${issue.number}`}
+            state={location.state}
+            aria-label={`#${issue.number} ${issue.title}`}
+            className="min-w-4 flex-[1_1_auto] truncate rounded-sm font-medium leading-5 outline-none after:absolute after:inset-0 focus-visible:ring-2 focus-visible:ring-ring"
           >
             {issue.title}
-          </p>
+          </Link>
         </TooltipTrigger>
         <TooltipContent
           side="bottom"
@@ -210,17 +215,24 @@ function IssueRow({ issue }: { issue: Issue }) {
   )
 }
 
-/** Preserve group pagination during refresh failures and report refresh errors beside the toolbar action. */
+/** Preserve list choices, pages and scroll position when returning from a detail or another workspace. */
 export function Workspace({
   userId,
   repository,
   onSessionExpired,
+  scrollPositions,
 }: {
   userId: string
   repository: { id: number; full_name: string; private: boolean }
   onSessionExpired: () => void
+  scrollPositions: RefObject<Map<number, number>>
 }) {
   const { t } = useTranslation()
+  useLayoutEffect(() => {
+    const positions = scrollPositions.current
+    window.scrollTo(0, positions.get(repository.id) ?? 0)
+    return () => { positions.set(repository.id, window.scrollY) }
+  }, [repository.id, scrollPositions])
   const [stored, setStored] = useState(() =>
     readWorkspacePreferences(userId, repository.id),
   )
