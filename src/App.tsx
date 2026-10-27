@@ -106,8 +106,9 @@ export default function App() {
     )
   }, [queryClient])
 
-  /** Invalidate the server session before clearing the displayed identity and issue cache. */
+  /** Confirm draft disposal before invalidating the session and clearing private cached content. */
   async function logout() {
+    if (!window.dispatchEvent(new Event('issuel:before-discard', { cancelable: true }))) return
     setLoggingOut(true)
     setError(null)
     try {

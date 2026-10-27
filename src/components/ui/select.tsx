@@ -39,14 +39,17 @@ export function SelectTrigger({
   )
 }
 
-/** Portal the shadcn Select menu above the workspace with bounded scrolling. */
+/** Portal the styled Select menu into its dialog or document with bounded scrolling. */
 export function SelectContent({
   className,
   children,
+  container,
   ...props
-}: ComponentProps<typeof SelectPrimitive.Content>) {
+}: ComponentProps<typeof SelectPrimitive.Content> & {
+  container?: ComponentProps<typeof SelectPrimitive.Portal>['container']
+}) {
   return (
-    <SelectPrimitive.Portal>
+    <SelectPrimitive.Portal container={container}>
       <SelectPrimitive.Content
         data-slot="select-content"
         position="popper"

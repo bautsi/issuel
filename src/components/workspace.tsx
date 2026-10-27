@@ -400,7 +400,7 @@ export function Workspace({
           </h2>
           <div className="flex flex-wrap items-center gap-2">
             {/* Issue creation requires both user and App write access */}
-            {canWrite && <NewIssue userId={userId} repositoryId={repository.id} onSessionExpired={onSessionExpired} />}
+            {canWrite && <NewIssue userId={userId} repositoryId={repository.id} fullName={repository.full_name} onSessionExpired={onSessionExpired} />}
 
             <Button
               variant="outline"

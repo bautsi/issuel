@@ -5,10 +5,12 @@ import { Button } from '@/components/ui/button'
 import { defaultStatuses, IssueReadError } from '@/lib/issues'
 import type { IssueStatus } from '@/lib/issues'
 import { useIssueWrite } from '@/lib/use-issue-write'
+import { MarkdownEditor } from '@/components/markdown-editor'
+import { useUnsavedChanges } from '@/lib/use-unsaved-changes'
 
-/** Keep a raw Markdown draft through failures and open GitHub's returned issue after creation. */
-export function NewIssue({ userId, repositoryId, onSessionExpired }: {
-  userId: string; repositoryId: number; onSessionExpired: () => void
+/** Compose Markdown in either mode, retain failed drafts and open the confirmed GitHub issue. */
+export function NewIssue({ userId, repositoryId, fullName, onSessionExpired }: {
+  userId: string; repositoryId: number; fullName: string; onSessionExpired: () => void
 }) {
   const { t } = useTranslation()
   const navigate = useNavigate()
@@ -17,6 +19,7 @@ export function NewIssue({ userId, repositoryId, onSessionExpired }: {
   const [body, setBody] = useState('')
   const [status, setStatus] = useState<IssueStatus>('backlog')
   const write = useIssueWrite(userId, repositoryId)
+  const unsaved = useUnsavedChanges(!!title || !!body || status !== 'backlog')
   const denied = write.error instanceof IssueReadError && write.error.status === 403
   useEffect(() => {
     if (write.error instanceof IssueReadError && write.error.status === 401) onSessionExpired()
@@ -28,6 +31,7 @@ export function NewIssue({ userId, repositoryId, onSessionExpired }: {
     try {
       const issue = await write.submit({ title, body, status })
       if (!issue) return
+      unsaved.current = false
       dialog.current?.close()
       setTitle('')
       setBody('')
@@ -49,7 +53,7 @@ export function NewIssue({ userId, repositoryId, onSessionExpired }: {
       {/* Modal draft uses native focus trapping and Escape handling */}
       <dialog ref={dialog} aria-labelledby="new-issue-heading"
         onCancel={(event) => { if (write.isPending) event.preventDefault() }}
-        className="fixed inset-0 m-auto w-[calc(100%_-_2rem)] max-w-xl rounded-xl border bg-card p-0 text-card-foreground shadow-2xl backdrop:bg-black/60">
+        className="fixed inset-0 m-auto max-h-[90svh] w-[calc(100%_-_2rem)] max-w-2xl overflow-y-auto rounded-xl border bg-card p-0 text-card-foreground shadow-2xl backdrop:bg-black/60">
         <form className="space-y-5 p-6" aria-busy={write.isPending}
           onSubmit={(event) => { event.preventDefault(); void create() }}>
           {/* Draft fields */}
@@ -59,11 +63,12 @@ export function NewIssue({ userId, repositoryId, onSessionExpired }: {
               onChange={(event) => setTitle(event.target.value)}
               className="mt-2 block w-full rounded-md border bg-background px-3 py-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring" />
           </label>
-          <label className="block text-xs font-medium">{t('Description (optional Markdown)')}
-            <textarea value={body} rows={8} disabled={write.isPending || denied}
-              onChange={(event) => setBody(event.target.value)}
-              className="mt-2 block w-full resize-y rounded-md border bg-background px-3 py-2 font-mono text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring" />
-          </label>
+          {/* Shared description editor submits only its controlled Markdown string. */}
+          <div className="space-y-2">
+            <p className="text-xs font-medium">{t('Description (optional Markdown)')}</p>
+            <MarkdownEditor value={body} onChange={setBody} label={t('Description')}
+              fullName={fullName} disabled={write.isPending || denied} />
+          </div>
           <label className="block text-xs font-medium">{t('Status')}
             <select value={status} disabled={write.isPending || denied}
               onChange={(event) => setStatus(event.target.value as IssueStatus)}

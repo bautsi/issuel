@@ -7,12 +7,14 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import { StatusIcon } from '@/components/workspace'
 import { IssueMarkdown } from '@/components/issue-markdown'
+import { MarkdownEditor } from '@/components/markdown-editor'
 import { defaultStatuses, getIssueStatus, IssueReadError } from '@/lib/issues'
 import { useIssueDetail } from '@/lib/use-issue-detail'
 import { useIssueComment, useIssueWrite } from '@/lib/use-issue-write'
+import { useUnsavedChanges } from '@/lib/use-unsaved-changes'
 import type { IssueStatus } from '@/lib/issues'
 
-/** Read GitHub content and manage issue metadata and comments through scoped, confirmed writes. */
+/** Read GitHub content, edit descriptions locally and submit metadata or comments through confirmed writes. */
 export function IssueDetail({
   userId, repository, number, onSessionExpired,
 }: {
@@ -35,7 +37,8 @@ export function IssueDetail({
   const metadataSubmitting = useRef(false)
   const [search, setSearch] = useState('')
   const [draftComment, setDraftComment] = useState('')
-  const [commentMode, setCommentMode] = useState<'write' | 'preview'>('write')
+  const [descriptionDraft, setDescriptionDraft] = useState<{ original: string; value: string } | null>(null)
+  useUnsavedChanges(!!draftComment || (descriptionDraft !== null && descriptionDraft.value !== descriptionDraft.original))
   const { detail, comments, options } = useIssueDetail(userId, repository.id, number, selector)
   const write = useIssueWrite(userId, repository.id, number)
   const commentWrite = useIssueComment(userId, repository.id, number)
@@ -175,13 +178,12 @@ export function IssueDetail({
     }
   }
 
-  /** Return to writing after confirmed submission; preserve Markdown on failed or uncertain outcomes. */
+  /** Clear only confirmed comments and preserve the complete Markdown draft on failed or uncertain outcomes. */
   async function saveComment() {
     if (!canWrite || commentWrite.isPending || write.isPending || metadataSubmitting.current || !draftComment.trim()) return
     try {
       if (await commentWrite.submit(draftComment)) {
         setDraftComment('')
-        setCommentMode('write')
       }
     } catch { /* Keep the exact draft so the user can check GitHub before deciding to resubmit. */ }
   }
@@ -280,9 +282,25 @@ export function IssueDetail({
               <p className="mt-3 text-xs text-amber-300">{t('Status mapping needs attention. GitHub state and reason are shown in properties.')}</p>
             )}
 
-            {/* Description retains the remote Markdown without editing it */}
+            {/* Description edits stay local until the safe persistence workflow is implemented. */}
             <section aria-label={t('Description')} className="mt-8 min-w-0">
-              {issue.body?.trim() ? (
+              <div className="mb-3 flex items-center justify-between gap-3">
+                <h2 className="text-xs font-medium text-muted-foreground">{t('Description')}</h2>
+                {canWrite && descriptionDraft === null && <Button type="button" variant="outline" className="h-7 text-xs"
+                  onClick={() => setDescriptionDraft({ original: issue.body ?? '', value: issue.body ?? '' })}>{t('Edit locally')}</Button>}
+              </div>
+              {descriptionDraft !== null ? (
+                <div className="space-y-3">
+                  <p role="status" className="text-xs text-amber-300">{t('Local editing only. Changes are not saved to GitHub and will be lost when you leave.')}</p>
+                  <MarkdownEditor value={descriptionDraft.value}
+                    onChange={(value) => setDescriptionDraft({ ...descriptionDraft, value })} label={t('Description')}
+                    fullName={issue.full_name} defaultBranch={issue.default_branch} githubUrl={issue.html_url} readOnly={!canWrite} />
+                  <Button type="button" variant="outline" className="h-7 text-xs" onClick={() => {
+                    if (descriptionDraft.value !== descriptionDraft.original && !window.confirm(t('Discard local description changes?'))) return
+                    setDescriptionDraft(null)
+                  }}>{t('Close local editor')}</Button>
+                </div>
+              ) : issue.body?.trim() ? (
                 <IssueMarkdown body={issue.body} fullName={issue.full_name} defaultBranch={issue.default_branch} githubUrl={issue.html_url} />
               ) : <p className="text-sm text-muted-foreground">{t('No description provided.')}</p>}
             </section>
@@ -349,38 +367,12 @@ export function IssueDetail({
               {canWrite && (
                 <form className="mt-7 space-y-3" aria-busy={commentWrite.isPending}
                   onSubmit={(event) => { event.preventDefault(); void saveComment() }}>
-                  <label htmlFor="comment-body" className="block text-xs font-medium">{t('Add a comment')}</label>
+                  <p className="text-xs font-medium">{t('Add a comment')}</p>
 
-                  {/* Writing and safe GFM preview share one draft without submitting it */}
-                  <div role="tablist" aria-label={t('Add a comment')} className="flex gap-1 border-b"
-                    onKeyDown={(event) => {
-                      if (commentWrite.isPending || !['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return
-                      event.preventDefault()
-                      const mode = event.key === 'Home' ? 'write' : event.key === 'End' ? 'preview' : commentMode === 'write' ? 'preview' : 'write'
-                      setCommentMode(mode)
-                      event.currentTarget.querySelector<HTMLButtonElement>(`#comment-${mode}-tab`)?.focus()
-                    }}>
-                    {(['write', 'preview'] as const).map((mode) => (
-                      <button key={mode} type="button" role="tab" id={`comment-${mode}-tab`}
-                        aria-selected={commentMode === mode} aria-controls={`comment-${mode}-panel`}
-                        tabIndex={commentMode === mode ? 0 : -1} disabled={commentWrite.isPending}
-                        onClick={() => setCommentMode(mode)}
-                        className={`border-b-2 px-3 py-2 text-xs focus-visible:outline-2 focus-visible:outline-ring disabled:opacity-60 ${
-                          commentMode === mode ? 'border-foreground text-foreground' : 'border-transparent text-muted-foreground hover:text-foreground'
-                        }`}>{t(mode === 'write' ? 'Write' : 'Preview')}</button>
-                    ))}
-                  </div>
-                  <div id="comment-write-panel" role="tabpanel" aria-labelledby="comment-write-tab" hidden={commentMode !== 'write'}>
-                    <textarea id="comment-body" rows={5} value={draftComment} disabled={commentWrite.isPending}
-                      onChange={(event) => setDraftComment(event.target.value)} placeholder={t('Write a comment in Markdown…')}
-                      className="block w-full resize-y rounded-lg border bg-background p-3 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-60" />
-                  </div>
-                  <div id="comment-preview-panel" role="tabpanel" aria-labelledby="comment-preview-tab" tabIndex={0}
-                    hidden={commentMode !== 'preview'} className="min-h-32 min-w-0 rounded-lg border bg-background p-3 focus-visible:outline-2 focus-visible:outline-ring">
-                    {commentMode === 'preview' && (draftComment.trim() ? (
-                      <IssueMarkdown body={draftComment} fullName={issue.full_name} defaultBranch={issue.default_branch} githubUrl={issue.html_url} />
-                    ) : <p className="text-sm text-muted-foreground">{t('Nothing to preview.')}</p>)}
-                  </div>
+                  {/* Both modes preserve the same Markdown draft until explicit submission. */}
+                  <MarkdownEditor value={draftComment} onChange={setDraftComment} label={t('Add a comment')}
+                    fullName={issue.full_name} defaultBranch={issue.default_branch} githubUrl={issue.html_url}
+                    disabled={commentWrite.isPending} />
 
                   {/* Submission uses the same Markdown from either tab */}
                   <div className="flex flex-wrap items-center justify-between gap-3">

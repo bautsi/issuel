@@ -134,3 +134,27 @@
 .issue-markdown :is(th, td) { min-width: 6rem; border: 1px solid var(--border); padding: 0.5em 0.75em; }
 .issue-markdown th { background: var(--muted); text-align: left; }
 .issue-markdown hr { border-top: 1px solid var(--border); }
+
+/* Rich editing shares reading styles while containing wide tables and code blocks. */
+.markdown-editor .editor-control {
+  height: 1.75rem;
+  border-radius: 0.25rem;
+  padding-inline: 0.4rem;
+  font-size: 0.75rem;
+}
+.markdown-editor .editor-control:hover,
+.markdown-editor .editor-control[aria-pressed='true'] { background: var(--muted); }
+.markdown-editor .editor-control:focus-visible { outline: 2px solid var(--ring); outline-offset: -2px; }
+.markdown-editor .editor-control:disabled { opacity: 0.5; }
+.markdown-rich { min-height: 10rem; max-height: 32rem; overflow: auto; padding: 0.75rem; outline: none; }
+.markdown-rich:focus-visible { box-shadow: inset 0 0 0 2px var(--ring); }
+.markdown-rich[aria-disabled='true'] { pointer-events: none; }
+.markdown-rich .tableWrapper { max-width: 100%; overflow-x: auto; }
+.markdown-rich ul[data-type='taskList'] { list-style: none; padding-left: 0.3rem; }
+.markdown-rich li[data-type='taskItem'] { display: flex; align-items: flex-start; gap: 0.5rem; }
+.markdown-rich li[data-type='taskItem'] > label { flex: 0 0 auto; }
+.markdown-rich li[data-type='taskItem'] > div { min-width: 0; flex: 1; }
+.markdown-rich li[data-type='taskItem'] > div > p { margin-block: 0; }
+.markdown-rich li[data-type='taskItem'] input { margin: 0; }
+.markdown-rich .selectedCell { background: var(--muted); }
+.markdown-rich .ProseMirror-selectednode { outline: 2px solid var(--ring); }
