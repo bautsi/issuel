@@ -1,9 +1,9 @@
 import { useInfiniteQuery, useQuery, useQueryClient } from '@tanstack/react-query'
-import type { readIssueComments, readIssueDetail } from '../../server/issue-detail'
+import type { readIssueComments, readIssueDetail, readIssueOptions } from '../../server/issue-detail'
 import { IssueReadError } from '@/lib/issues'
 
 export type IssueDetail = Awaited<ReturnType<typeof readIssueDetail>>
-type CommentsPage = Awaited<ReturnType<typeof readIssueComments>> & {
+export type CommentsPage = Awaited<ReturnType<typeof readIssueComments>> & {
   userId: string
   repositoryId: number
   number: number
@@ -38,8 +38,8 @@ export async function requestIssueRead(path: string, signal: AbortSignal) {
   return data
 }
 
-/** Wait for repository identity, then revalidate detail without affecting list caches. */
-export function useIssueDetail(userId: string, repositoryId: number | null, number: number) {
+/** Isolate detail, paged comments and on-demand repository choices by account and repository. */
+export function useIssueDetail(userId: string, repositoryId: number | null, number: number, selector: 'labels' | 'assignees' | null = null) {
   const client = useQueryClient()
   const queryKey = ['github', userId, repositoryId, 'issue', number] as const
   const commentsKey = [...queryKey, 'comments'] as const
@@ -97,5 +97,24 @@ export function useIssueDetail(userId: string, repositoryId: number | null, numb
     retry: false,
     networkMode: 'always',
   })
-  return { detail, comments }
+  const optionsKey = ['github', userId, repositoryId, 'options', selector] as const
+  const previousOptionsError = client.getQueryState(optionsKey)?.error
+  const options = useQuery({
+    queryKey: optionsKey,
+    queryFn: async ({ signal }): Promise<Awaited<ReturnType<typeof readIssueOptions>>> => {
+      if (previousOptionsError instanceof IssueReadError && previousOptionsError.retryAt > Date.now()) throw previousOptionsError
+      const data = await requestIssueRead(`/api/repositories/${repositoryId}/${selector}`, signal)
+      if (data?.userId !== userId) throw new IssueReadError('Your GitHub session changed. Connect GitHub again.', 401)
+      if (data.repositoryId !== repositoryId || !Array.isArray(data.labels) || !Array.isArray(data.assignees))
+        throw new IssueReadError('The server returned invalid issue content.', 502)
+      return data
+    },
+    enabled: repositoryId !== null && selector !== null && detail.isSuccess,
+    staleTime: 0,
+    retry: false,
+    refetchOnWindowFocus: false,
+    refetchOnReconnect: false,
+    networkMode: 'always',
+  })
+  return { detail, comments, options }
 }

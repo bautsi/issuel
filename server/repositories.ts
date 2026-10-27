@@ -37,7 +37,7 @@ export class RepositoryError extends Error {
 export async function githubResponse(
   path: string,
   accessToken: string,
-  write?: { method: 'POST' | 'PATCH'; body: Record<string, unknown> },
+  write?: { method: 'POST' | 'PATCH' | 'DELETE'; body: Record<string, unknown> },
 ) {
   let response: Response
   try {

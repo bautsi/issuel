@@ -1,5 +1,5 @@
 import { githubResponse, RepositoryError } from './repositories.ts'
-import { projectIssueDetail, readIssueDetail } from './issue-detail.ts'
+import { projectIssueComment, projectIssueDetail, readIssueDetail } from './issue-detail.ts'
 import { defaultStatuses, getIssueStatus } from './issue-status.ts'
 
 const pendingWrites = new Map<string, Promise<unknown>>()
@@ -55,14 +55,21 @@ export async function createIssue(access: string, repositoryId: number, input: u
   return issue
 }
 
-/** Serialize all local writers for the same GitHub issue, then patch only title or status fields. */
+/** Serialize issue writes and use single-item endpoints for ordinary labels and assignees. */
 export async function updateIssue(access: string, repositoryId: number, number: number, input: unknown) {
   if (!input || typeof input !== 'object' || Array.isArray(input))
     throw new RepositoryError('invalid_issue_write', 400)
   const fields = input as Record<string, unknown>
   const titleWrite = Object.keys(fields).length === 1 && typeof fields.title === 'string' && !!fields.title.trim()
+  const labelWrite = Object.keys(fields).length === 2 && typeof fields.label === 'string' &&
+    !!fields.label.trim() && typeof fields.remove === 'boolean'
+  const assigneeWrite = Object.keys(fields).length === 2 && typeof fields.assignee === 'string' &&
+    !!fields.assignee.trim() && typeof fields.remove === 'boolean'
+  if (labelWrite && defaultStatuses.some((status) =>
+    status.state === 'open' && status.label === (fields.label as string).toLowerCase(),
+  )) throw new RepositoryError('status_label_protected', 422)
   const status = defaultStatuses.find((item) => item.id === fields.status)
-  if (!titleWrite && (!status ||
+  if (!titleWrite && !labelWrite && !assigneeWrite && (!status ||
     Object.keys(fields).some((key) => !['status', 'duplicateNumber'].includes(key)) ||
     (status.id === 'duplicate'
       ? !Number.isSafeInteger(fields.duplicateNumber) || Number(fields.duplicateNumber) <= 0 || fields.duplicateNumber === number
@@ -76,6 +83,33 @@ export async function updateIssue(access: string, repositoryId: number, number: 
   await previous
   try {
     const current = await readIssueDetail(access, repositoryId, number)
+    if (labelWrite || assigneeWrite) {
+      const base = `/repos/${current.full_name}/issues/${number}`
+      if (labelWrite) {
+        // A definition must already exist; this UI never creates repository labels.
+        if (!fields.remove) await githubResponse(
+          `/repos/${current.full_name}/labels/${encodeURIComponent(fields.label as string)}`, access,
+        )
+        await githubResponse(`${base}/labels${fields.remove ? `/${encodeURIComponent(fields.label as string)}` : ''}`, access, {
+          method: fields.remove ? 'DELETE' : 'POST',
+          body: fields.remove ? {} : { labels: [fields.label] },
+        })
+      } else {
+        const { data } = await githubResponse(`${base}/assignees`, access, {
+          method: fields.remove ? 'DELETE' : 'POST', body: { assignees: [fields.assignee] },
+        })
+        const accepted = projectIssueDetail(data, {
+          id: repositoryId, full_name: current.full_name, default_branch: current.default_branch,
+        }, repositoryId, number)
+        const assigned = accepted.assignees.some((user) => user.login.toLowerCase() === (fields.assignee as string).toLowerCase())
+        if (assigned === fields.remove) throw new RepositoryError('assignee_not_applied', 422)
+        return accepted
+      }
+      const accepted = await readIssueDetail(access, repositoryId, number)
+      const labeled = accepted.labels.some((label) => label.name.toLowerCase() === (fields.label as string).toLowerCase())
+      if (labeled === fields.remove) throw new RepositoryError('github_write_not_applied', 409)
+      return accepted
+    }
     const body: Record<string, unknown> = {}
     if (titleWrite) {
       const title = (fields.title as string).trim()
@@ -116,5 +150,20 @@ export async function updateIssue(access: string, repositoryId: number, number: 
   } finally {
     release()
     if (pendingWrites.get(key) === pending) pendingWrites.delete(key)
+  }
+}
+
+/** Create a comment once after checking issue access; return only validated GitHub content. */
+export async function createIssueComment(access: string, repositoryId: number, number: number, input: unknown) {
+  if (!input || typeof input !== 'object' || Array.isArray(input) ||
+    Object.keys(input).length !== 1 || !('body' in input) ||
+    typeof input.body !== 'string' || !input.body.trim())
+    throw new RepositoryError('invalid_comment', 422)
+  const issue = await readIssueDetail(access, repositoryId, number)
+  const { data } = await githubResponse(`/repos/${issue.full_name}/issues/${number}/comments`, access, {
+    method: 'POST', body: { body: input.body },
+  })
+  try { return projectIssueComment(data, issue.html_url) } catch {
+    throw new RepositoryError('github_write_uncertain', 502)
   }
 }

@@ -3,9 +3,11 @@ import { useMutation, useQueryClient } from '@tanstack/react-query'
 import type { InfiniteData } from '@tanstack/react-query'
 import { getIssueStatus, IssueReadError } from '@/lib/issues'
 import type { IssuePage, IssueStatus } from '@/lib/issues'
-import type { IssueDetail } from '@/lib/use-issue-detail'
+import type { CommentsPage, IssueDetail } from '@/lib/use-issue-detail'
+import type { projectIssueComment } from '../../server/issue-detail'
 
-type Write = { title: string; body?: string; status?: IssueStatus } | { status: IssueStatus; duplicateNumber?: number }
+type Write = { title: string; body?: string; status?: IssueStatus } | { status: IssueStatus; duplicateNumber?: number } |
+  { label: string; remove: boolean } | { assignee: string; remove: boolean }
 
 /** Submit once, then reconcile only this user's repository caches from GitHub's accepted issue. */
 export function useIssueWrite(userId: string, repositoryId: number | null, number?: number) {
@@ -48,6 +50,8 @@ export function useIssueWrite(userId: string, repositoryId: number | null, numbe
           github_write_uncertain: 'The write result is unknown. Check GitHub before retrying to avoid duplicate changes.',
           github_write_rejected: 'GitHub rejected this change. Check the fields and duplicate target before retrying.',
           github_write_conflict: 'GitHub reported a conflict. Check the latest issue before retrying.',
+          status_label_protected: 'Status labels can only be changed through Status.',
+          assignee_not_applied: 'GitHub did not apply this assignee change. The user may not be assignable or the issue may have reached its assignee limit.',
         }
         const fallback: Record<number, string> = {
           401: 'Your session has expired. Connect GitHub again.',
@@ -60,7 +64,9 @@ export function useIssueWrite(userId: string, repositoryId: number | null, numbe
           response.status, Number(response.headers.get('Retry-After')) || 0,
         )
       }
-      if (data?.userId !== userId)
+      if (!data || typeof data.userId !== 'string')
+        throw new IssueReadError('The write result is unknown. Check GitHub before retrying to avoid duplicate changes.', 502)
+      if (data.userId !== userId)
         throw new IssueReadError('Your GitHub session changed. Connect GitHub again.', 401)
       if (data.repositoryId !== repositoryId || !data.issue ||
         !Number.isSafeInteger(data.issue.number) || (number !== undefined && data.issue.number !== number))
@@ -70,7 +76,7 @@ export function useIssueWrite(userId: string, repositoryId: number | null, numbe
     onError: (error) => {
       if (error instanceof IssueReadError && error.retryAt > Date.now()) retryLimit.current = error
     },
-    onSuccess: async (issue) => {
+    onSuccess: async (issue, input) => {
       const prefix = ['github', userId, repositoryId] as const
       await Promise.all([
         client.cancelQueries({ queryKey: [...prefix, 'issues'] }),
@@ -84,6 +90,13 @@ export function useIssueWrite(userId: string, repositoryId: number | null, numbe
         predicate: (query) => query.queryKey.length === 6,
       }, (data) => {
         if (!data) return data
+        if ('label' in input || 'assignee' in input) return {
+          ...data,
+          pages: data.pages.map((page) => ({
+            ...page,
+            issues: page.issues.map((item) => item.id === issue.id ? issue : item),
+          })),
+        }
         const first = data.pages[0]
         const matches = first.state === issue.state &&
           (first.category === null || getIssueStatus(issue).status === first.category)
@@ -109,6 +122,108 @@ export function useIssueWrite(userId: string, repositoryId: number | null, numbe
     if (submitting.current) return undefined
     submitting.current = true
     try { return await mutation.mutateAsync(input) }
+    finally { submitting.current = false }
+  }
+
+  return { ...mutation, submit }
+}
+
+/** Post once and merge the confirmed comment without replacing pagination or refetching issue lists. */
+export function useIssueComment(userId: string, repositoryId: number | null, number: number) {
+  const client = useQueryClient()
+  const submitting = useRef(false)
+  const retryLimit = useRef<IssueReadError | null>(null)
+  const prefix = ['github', userId, repositoryId] as const
+  const detailKey = [...prefix, 'issue', number] as const
+  const commentsKey = [...detailKey, 'comments'] as const
+  const mutation = useMutation({
+    mutationKey: [...prefix, 'comment', number],
+    scope: { id: `github:${userId}:${repositoryId}:${number}` },
+    retry: false,
+    networkMode: 'always',
+    mutationFn: async (body: string): Promise<Awaited<ReturnType<typeof projectIssueComment>>> => {
+      if (!body.trim()) throw new IssueReadError('Enter a comment before submitting.', 422)
+      if (!client.getQueryData<InfiniteData<CommentsPage>>(commentsKey)?.pages.length)
+        throw new IssueReadError('Load comments before submitting.', 409)
+      if (retryLimit.current && retryLimit.current.retryAt > Date.now()) throw retryLimit.current
+      let response: Response
+      try {
+        response = await fetch(`/api/repositories/${repositoryId}/issues/${number}/comments`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Issuel-User': userId },
+          body: JSON.stringify({ body }), cache: 'no-store',
+        })
+      } catch {
+        throw new IssueReadError('The comment result is unknown. Check GitHub before submitting again to avoid duplicates.')
+      }
+      const data = await response.json().catch(() => null)
+      if (!response.ok) {
+        const messages: Record<number, string> = {
+          401: 'Your session has expired. Connect GitHub again.',
+          403: 'Writing requires repository push access and App Issues write permission. Check access in GitHub.',
+          404: 'Issue not found or no longer accessible. Pull requests are not supported here.',
+          422: 'GitHub rejected this comment. Check the content before retrying.',
+          429: 'GitHub rate limit reached. Please wait before retrying.',
+        }
+        throw new IssueReadError(messages[response.status] ??
+          'The comment result is unknown. Check GitHub before submitting again to avoid duplicates.',
+          response.status, Number(response.headers.get('Retry-After')) || 0)
+      }
+      if (!data || typeof data.userId !== 'string')
+        throw new IssueReadError('The comment result is unknown. Check GitHub before submitting again to avoid duplicates.', 502)
+      if (data.userId !== userId) throw new IssueReadError('Your GitHub session changed. Connect GitHub again.', 401)
+      if (data.repositoryId !== repositoryId || data.number !== number ||
+        !Number.isSafeInteger(data.comment?.id) || data.comment.id <= 0 || typeof data.comment.body !== 'string')
+        throw new IssueReadError('The comment result is unknown. Check GitHub before submitting again to avoid duplicates.', 502)
+      return data.comment
+    },
+    onError: (error) => {
+      if (error instanceof IssueReadError && error.retryAt > Date.now()) retryLimit.current = error
+    },
+    onSuccess: async (comment) => {
+      await Promise.all([
+        client.cancelQueries({ queryKey: commentsKey }),
+        client.cancelQueries({ queryKey: detailKey, exact: true }),
+        client.cancelQueries({ queryKey: [...prefix, 'issues'] }),
+      ])
+      if (!client.getQueryData(['github', userId, 'repositories'])) return
+      const cached = client.getQueryData<InfiniteData<CommentsPage>>(commentsKey)
+      const alreadyPresent = cached?.pages.some((page) => page.comments.some((item) => item.id === comment.id))
+      client.setQueryData<InfiniteData<CommentsPage>>(commentsKey, (data) => {
+        // Keep every GitHub cursor: a confirmed newest comment can follow an incomplete history.
+        if (!data?.pages.length) return data
+        if (alreadyPresent) return data
+        return {
+          ...data,
+          pages: data.pages.map((page, index) => index === data.pages.length - 1
+            ? { ...page, comments: [...page.comments, comment] } : page),
+        }
+      })
+      if (!alreadyPresent) {
+        client.setQueryData<IssueDetail>(detailKey, (issue) => issue ? { ...issue, comments: issue.comments + 1 } : issue)
+        client.setQueriesData<InfiniteData<IssuePage>>({ queryKey: [...prefix, 'issues'] }, (data) => data ? {
+          ...data, pages: data.pages.map((page) => ({
+            ...page, issues: page.issues.map((issue) => issue.number === number ? { ...issue, comments: issue.comments + 1 } : issue),
+          })),
+        } : data)
+      }
+      await client.invalidateQueries({ queryKey: detailKey, exact: true })
+      const accepted = client.getQueryState<IssueDetail>(detailKey)
+      if (accepted?.status === 'success' && accepted.data && client.getQueryData(['github', userId, 'repositories'])) {
+        const count = accepted.data.comments
+        client.setQueriesData<InfiniteData<IssuePage>>({ queryKey: [...prefix, 'issues'] }, (data) => data ? {
+          ...data, pages: data.pages.map((page) => ({
+            ...page, issues: page.issues.map((issue) => issue.number === number ? { ...issue, comments: count } : issue),
+          })),
+        } : data)
+      }
+    },
+  })
+
+  /** Guard the click-to-render interval as well as the pending network operation. */
+  async function submit(body: string) {
+    if (submitting.current) return undefined
+    submitting.current = true
+    try { return await mutation.mutateAsync(body) }
     finally { submitting.current = false }
   }
 

@@ -16,8 +16,8 @@ import {
   resolveWorkspace,
 } from './repositories.ts'
 import { readIssues } from './issues.ts'
-import { readIssueComments, readIssueDetail } from './issue-detail.ts'
-import { createIssue, updateIssue } from './issue-writes.ts'
+import { readIssueComments, readIssueDetail, readIssueOptions } from './issue-detail.ts'
+import { createIssue, createIssueComment, updateIssue } from './issue-writes.ts'
 import { defaultStatuses } from './issue-status.ts'
 import { githubFetch } from './logging.ts'
 
@@ -637,11 +637,14 @@ export function createAuth() {
       '/repositories/:repositoryId/issues',
       '/repositories/:repositoryId/issues/:number',
       '/repositories/:repositoryId/issues/:number/comments',
+      '/repositories/:repositoryId/labels',
+      '/repositories/:repositoryId/assignees',
     ],
     async (c) => {
       const writing = c.req.method !== 'GET'
       if (writing && !(
         (c.req.method === 'POST' && /^\/api\/repositories\/[1-9]\d*\/issues$/.test(c.req.path)) ||
+        (c.req.method === 'POST' && /^\/api\/repositories\/[1-9]\d*\/issues\/[1-9]\d*\/comments$/.test(c.req.path)) ||
         (c.req.method === 'PATCH' && /^\/api\/repositories\/[1-9]\d*\/issues\/[1-9]\d*$/.test(c.req.path))
       )) return c.json({ error: 'Not found' }, 404)
       if (!config) throw new AuthError('auth_not_configured')
@@ -719,9 +722,17 @@ export function createAuth() {
               return c.json({ error: 'invalid_issue_write' }, 400)
             const input: unknown = await c.req.json().catch(() => null)
             result = {
-              issue: issueNumber === undefined
-                ? await createIssue(token, repository.id, input)
-                : await updateIssue(token, repository.id, Number(issueNumber), input),
+              ...(c.req.path.endsWith('/comments')
+                ? { comment: await createIssueComment(token, repository.id, Number(issueNumber), input), number: Number(issueNumber) }
+                : { issue: issueNumber === undefined
+                    ? await createIssue(token, repository.id, input)
+                    : await updateIssue(token, repository.id, Number(issueNumber), input) }),
+              userId: session.github_user_id,
+              repositoryId: repository.id,
+            }
+          } else if (c.req.path.endsWith('/labels') || c.req.path.endsWith('/assignees')) {
+            result = {
+              ...(await readIssueOptions(token, repository.id, c.req.path.endsWith('/labels') ? 'labels' : 'assignees')),
               userId: session.github_user_id,
               repositoryId: repository.id,
             }

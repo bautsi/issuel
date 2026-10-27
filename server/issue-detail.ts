@@ -1,4 +1,5 @@
 import { githubResponse, RepositoryError } from './repositories.ts'
+import { defaultStatuses } from './issue-status.ts'
 
 /** Accept only the public identity used by the reading view, including deleted accounts. */
 function readUser(value: unknown) {
@@ -110,19 +111,7 @@ export async function readIssueComments(
   )
   if (!Array.isArray(data) || data.length > perPage)
     throw new RepositoryError('github_invalid_response', 502)
-  const comments = data.map((value: unknown) => {
-    const item = value as Record<string, unknown> | null
-    if (!item || typeof item !== 'object' || Array.isArray(item) ||
-      !Number.isSafeInteger(item.id) || Number(item.id) <= 0 ||
-      !(item.body === null || typeof item.body === 'string'))
-      throw new RepositoryError('github_invalid_response', 502)
-    return {
-      id: Number(item.id), body: item.body,
-      author: readUser(item.user),
-      created_at: readDate(item.created_at), updated_at: readDate(item.updated_at),
-      html_url: `${issueUrl.origin}${issueUrl.pathname}#issuecomment-${item.id}`,
-    }
-  })
+  const comments = data.map((value: unknown) => projectIssueComment(value, `${issueUrl.origin}${issueUrl.pathname}`))
   let nextPage: number | null = null
   const next = link?.split(',').find((part) => /;\s*rel="next"/.test(part))
   if (next) {
@@ -138,4 +127,61 @@ export async function readIssueComments(
     nextPage = candidate
   }
   return { comments, page, perPage, nextPage }
+}
+
+/** Project both fetched and newly created comments through the same safe reading representation. */
+export function projectIssueComment(value: unknown, issueUrl: string) {
+  const item = value as Record<string, unknown> | null
+  if (!item || typeof item !== 'object' || Array.isArray(item) ||
+    !Number.isSafeInteger(item.id) || Number(item.id) <= 0 ||
+    !(item.body === null || typeof item.body === 'string'))
+    throw new RepositoryError('github_invalid_response', 502)
+  return {
+    id: Number(item.id), body: item.body as string | null,
+    author: readUser(item.user),
+    created_at: readDate(item.created_at), updated_at: readDate(item.updated_at),
+    html_url: `${issueUrl}#issuecomment-${item.id}`,
+  }
+}
+
+/** Enumerate the current repository's existing choices without accepting a partial options list. */
+export async function readIssueOptions(access: string, repositoryId: number, kind: 'labels' | 'assignees') {
+  const { data: metadata } = await githubResponse(`/repositories/${repositoryId}`, access)
+  const repository = metadata as Record<string, unknown>
+  if (repository.id !== repositoryId || typeof repository.full_name !== 'string' ||
+    !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository.full_name))
+    throw new RepositoryError('github_invalid_response', 502)
+  const labels: { id: number; name: string; color: string }[] = []
+  const assignees: { id: number; login: string }[] = []
+  for (let page = 1; ; page++) {
+    const path = `/repos/${repository.full_name}/${kind}`
+    const { data, link } = await githubResponse(`${path}?per_page=100&page=${page}`, access)
+    if (!Array.isArray(data) || data.length > 100) throw new RepositoryError('github_invalid_response', 502)
+    for (const value of data) {
+      if (kind === 'assignees') {
+        const user = readUser(value)
+        if (!user) throw new RepositoryError('github_invalid_response', 502)
+        assignees.push(user)
+      } else {
+        const label = value as Record<string, unknown> | null
+        if (!label || !Number.isSafeInteger(label.id) || Number(label.id) <= 0 ||
+          typeof label.name !== 'string' || typeof label.color !== 'string' || !/^[a-f0-9]{6}$/i.test(label.color))
+          throw new RepositoryError('github_invalid_response', 502)
+        const name = label.name
+        if (!defaultStatuses.some((status) => status.state === 'open' && status.label === name.toLowerCase()))
+          labels.push({ id: Number(label.id), name: label.name, color: label.color })
+      }
+    }
+    const next = link?.split(',').find((part) => /;\s*rel="next"/.test(part))
+    if (!next) break
+    let target: URL
+    try { target = new URL(next.match(/<([^>]+)>/)?.[1] ?? '') } catch {
+      throw new RepositoryError('github_invalid_response', 502)
+    }
+    if (target.origin !== 'https://api.github.com' || target.username || target.password ||
+      ![path, `/repositories/${repositoryId}/${kind}`].includes(target.pathname) ||
+      Number(target.searchParams.get('page')) !== page + 1 || target.searchParams.get('per_page') !== '100')
+      throw new RepositoryError('github_invalid_response', 502)
+  }
+  return { labels, assignees }
 }

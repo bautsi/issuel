@@ -4,14 +4,15 @@ import { useTranslation } from 'react-i18next'
 import { Button } from '@/components/ui/button'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Skeleton } from '@/components/ui/skeleton'
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import { StatusIcon } from '@/components/workspace'
 import { IssueMarkdown } from '@/components/issue-markdown'
 import { defaultStatuses, getIssueStatus, IssueReadError } from '@/lib/issues'
 import { useIssueDetail } from '@/lib/use-issue-detail'
-import { useIssueWrite } from '@/lib/use-issue-write'
+import { useIssueComment, useIssueWrite } from '@/lib/use-issue-write'
 import type { IssueStatus } from '@/lib/issues'
 
-/** Display remote issue content with serialized title and status editing for authorized writers. */
+/** Read GitHub content and manage issue metadata and comments through scoped, confirmed writes. */
 export function IssueDetail({
   userId, repository, number, onSessionExpired,
 }: {
@@ -25,8 +26,19 @@ export function IssueDetail({
   onSessionExpired: () => void
 }) {
   const { t, i18n } = useTranslation()
-  const { detail, comments } = useIssueDetail(userId, repository.id, number)
+  const [selector, setSelector] = useState<'labels' | 'assignees' | null>(null)
+  const selectorRef = useRef<HTMLDivElement>(null)
+  const [metadataDrafts, setMetadataDrafts] = useState({
+    labels: new Map<string, boolean>(), assignees: new Map<string, boolean>(),
+  })
+  const [savingMetadata, setSavingMetadata] = useState(false)
+  const metadataSubmitting = useRef(false)
+  const [search, setSearch] = useState('')
+  const [draftComment, setDraftComment] = useState('')
+  const [commentMode, setCommentMode] = useState<'write' | 'preview'>('write')
+  const { detail, comments, options } = useIssueDetail(userId, repository.id, number, selector)
   const write = useIssueWrite(userId, repository.id, number)
+  const commentWrite = useIssueComment(userId, repository.id, number)
   const [editingTitle, setEditingTitle] = useState(false)
   const [draftTitle, setDraftTitle] = useState('')
   const [targetStatus, setTargetStatus] = useState<IssueStatus | ''>('')
@@ -38,10 +50,23 @@ export function IssueDetail({
   const workspacePath = `/workspace/${encodeURIComponent(repository.owner)}/${encodeURIComponent(repository.name)}`
   useLayoutEffect(() => { window.scrollTo(0, 0) }, [])
   useEffect(() => {
-    if ([detail.error, comments.error, write.error].some(
+    if ([detail.error, comments.error, options.error, write.error, commentWrite.error].some(
       (error) => error instanceof IssueReadError && error.status === 401,
     )) onSessionExpired()
-  }, [detail.error, comments.error, write.error, onSessionExpired])
+  }, [detail.error, comments.error, options.error, write.error, commentWrite.error, onSessionExpired])
+
+  useEffect(() => {
+    if (selector === null) return
+
+    /** Dismiss outside interactions while preserving clicks inside the card and its trigger. */
+    function closeSelector(event: PointerEvent) {
+      if (metadataSubmitting.current) return
+      if (event.target instanceof Node && !selectorRef.current?.contains(event.target)) setSelector(null)
+    }
+
+    document.addEventListener('pointerdown', closeSelector, true)
+    return () => document.removeEventListener('pointerdown', closeSelector, true)
+  }, [selector])
 
   /** Show precise local dates while keeping the original GitHub timestamps in markup. */
   function date(value: string) {
@@ -50,16 +75,27 @@ export function IssueDetail({
 
   const issue = detail.data
   const mapped = issue ? getIssueStatus(issue) : null
+  const metadataChanges = {
+    labels: [...metadataDrafts.labels].filter(([name, selected]) => selected !==
+      !!mapped?.labels.some((label) => label.name.toLowerCase() === name.toLowerCase())),
+    assignees: [...metadataDrafts.assignees].filter(([login, selected]) => selected !==
+      !!issue?.assignees.some((user) => user.login.toLowerCase() === login.toLowerCase())),
+  }
+  // Keep current assignees removable even when GitHub no longer offers them for assignment.
+  const assigneeOptions = [
+    ...(options.data?.assignees ?? []),
+    ...(issue?.assignees ?? []).filter((user) => !options.data?.assignees.some((option) => option.id === user.id)),
+  ]
   const statusName = mapped?.status === 'conflict'
     ? 'Mapping conflict'
     : defaultStatuses.find((status) => status.id === mapped?.status)?.title
   const activity = [...new Map(
     (comments.data?.pages ?? []).flatMap((page) => page.comments).map((comment) => [comment.id, comment]),
-  ).values()]
+  ).values()].sort((a, b) => a.id - b.id)
 
   /** Start from the accepted title without changing the remote issue until submission. */
   function editTitle() {
-    if (!issue || !canWrite || write.isPending) return
+    if (!issue || !canWrite || write.isPending || metadataSubmitting.current) return
     cancelingTitle.current = false
     setDraftTitle(issue.title)
     setEditingTitle(true)
@@ -75,7 +111,7 @@ export function IssueDetail({
 
   /** Share Enter, Save and external blur through the same immediate mutation lock. */
   async function saveTitle() {
-    if (!issue || cancelingTitle.current || !editingTitle || !draftTitle.trim() || !canWrite || write.isPending) return
+    if (!issue || cancelingTitle.current || !editingTitle || !draftTitle.trim() || !canWrite || write.isPending || metadataSubmitting.current) return
     if (draftTitle.trim() === issue.title) { setEditingTitle(false); return }
     try {
       const saved = await write.submit({ title: draftTitle })
@@ -85,7 +121,7 @@ export function IssueDetail({
 
   /** Save a selected status immediately, requiring a valid target before confirming Duplicate. */
   async function saveStatus(status: IssueStatus) {
-    if (!canWrite || editingTitle || write.isPending) return
+    if (!canWrite || editingTitle || write.isPending || metadataSubmitting.current) return
     if (status === 'duplicate' &&
       (!/^[1-9]\d*$/.test(duplicateNumber) || !Number.isSafeInteger(Number(duplicateNumber)) || Number(duplicateNumber) === number)) return
     try {
@@ -94,6 +130,60 @@ export function IssueDetail({
         : { status })
       if (saved) { setTargetStatus(''); setDuplicateNumber('') }
     } catch { /* Retain the accepted remote status and any duplicate target for correction. */ }
+  }
+
+  /** Keep explicit selections locally until confirmation, including across ordinary card dismissal. */
+  function changeMetadata(kind: 'labels' | 'assignees', value: string, selected: boolean) {
+    if (!canWrite || metadataSubmitting.current || write.isPending || commentWrite.isPending) return
+    setMetadataDrafts((drafts) => ({ ...drafts, [kind]: new Map(drafts[kind]).set(value, selected) }))
+  }
+
+  /** Discard only this card's unsubmitted choices; accepted GitHub changes remain authoritative. */
+  function cancelMetadata(kind: 'labels' | 'assignees') {
+    if (metadataSubmitting.current) return
+    setMetadataDrafts((drafts) => ({ ...drafts, [kind]: new Map<string, boolean>() }))
+    if (!(write.error instanceof IssueReadError && write.error.status === 403)) write.reset()
+    setSelector(null)
+  }
+
+  /** Confirm changed items sequentially, freeing assignee slots first and retaining drafts on failure. */
+  async function saveMetadata(kind: 'labels' | 'assignees') {
+    if (!issue || !canWrite || metadataSubmitting.current || write.isPending || commentWrite.isPending || editingTitle || detail.isFetching) return
+    const changes = metadataChanges[kind].sort(([, left], [, right]) => Number(left) - Number(right))
+    if (!changes.length) return
+    metadataSubmitting.current = true
+    setSavingMetadata(true)
+    try {
+      let accepted = issue
+      for (const [value, selected] of changes) {
+        const present = kind === 'labels'
+          ? getIssueStatus(accepted).labels.some((label) => label.name.toLowerCase() === value.toLowerCase())
+          : accepted.assignees.some((user) => user.login.toLowerCase() === value.toLowerCase())
+        if (present === selected) continue
+        const saved = await write.submit(kind === 'labels'
+          ? { label: value, remove: !selected }
+          : { assignee: value, remove: !selected })
+        if (!saved) return
+        accepted = saved
+      }
+      setMetadataDrafts((drafts) => ({ ...drafts, [kind]: new Map<string, boolean>() }))
+      setSelector(null)
+    } catch { /* Keep all intended selections; accepted items are excluded from the next confirmation. */ }
+    finally {
+      metadataSubmitting.current = false
+      setSavingMetadata(false)
+    }
+  }
+
+  /** Return to writing after confirmed submission; preserve Markdown on failed or uncertain outcomes. */
+  async function saveComment() {
+    if (!canWrite || commentWrite.isPending || write.isPending || metadataSubmitting.current || !draftComment.trim()) return
+    try {
+      if (await commentWrite.submit(draftComment)) {
+        setDraftComment('')
+        setCommentMode('write')
+      }
+    } catch { /* Keep the exact draft so the user can check GitHub before deciding to resubmit. */ }
   }
 
   return (
@@ -148,7 +238,7 @@ export function IssueDetail({
               onSubmit={(event) => { event.preventDefault(); void saveTitle() }}
               onBlur={(event) => { if (!event.currentTarget.contains(event.relatedTarget)) void saveTitle() }}>
               <textarea aria-label={t('Title')} rows={1} required
-                value={editingTitle ? draftTitle : issue.title} readOnly={!editingTitle || !canWrite} disabled={write.isPending}
+                value={editingTitle ? draftTitle : issue.title} readOnly={!editingTitle || !canWrite} disabled={write.isPending || savingMetadata}
                 onFocus={() => { if (!editingTitle && !detail.isFetching) editTitle() }}
                 onClick={() => { if (!editingTitle && !detail.isFetching) editTitle() }}
                 onChange={(event) => setDraftTitle(event.target.value.replace(/[\r\n]+/g, ' '))}
@@ -179,7 +269,7 @@ export function IssueDetail({
 
             {/* Feedback is shared by title and status writes */}
             {write.error && <p role="alert" className="mt-3 text-xs text-destructive">{t(write.error.message)}</p>}
-            {(write.isPending || write.isSuccess) && <p role="status" className="mt-3 text-xs text-muted-foreground">{t(write.isPending ? 'Saving…' : 'Saved to GitHub.')}</p>}
+            {(savingMetadata || write.isPending || write.isSuccess) && <p role="status" className="mt-3 text-xs text-muted-foreground">{t(savingMetadata || write.isPending ? 'Saving…' : 'Saved to GitHub.')}</p>}
             {!canWrite && <p className="mt-3 text-xs text-muted-foreground">{t('Writing requires repository push access and App Issues write permission. Check access in GitHub.')}</p>}
             <p role="status" className="mt-3 text-[11px] text-muted-foreground">
               {t(detail.isFetching || !detail.isFetchedAfterMount
@@ -200,7 +290,7 @@ export function IssueDetail({
             {/* Comments have their own loading, error, empty and pagination states */}
             <section aria-labelledby="activity-heading" className="mt-12 border-t pt-6">
               <h2 id="activity-heading" className="text-sm font-semibold">{t('Activity')}</h2>
-              <p className="mt-1 text-xs text-muted-foreground">{t('GitHub comments · Read only')}</p>
+              <p className="mt-1 text-xs text-muted-foreground">{t('GitHub comments · {{count}} total', { count: issue.comments })}</p>
               {comments.isPending && <p role="status" className="mt-6 text-sm text-muted-foreground">{t('Loading comments…')}</p>}
               {comments.isRefetching && !comments.isFetchingNextPage && (
                 <p role="status" className="mt-4 text-xs text-muted-foreground">{t('Checking latest comments… Cached comments may be shown.')}</p>
@@ -254,17 +344,67 @@ export function IssueDetail({
                 </Button>
               )}
               {activity.length > 0 && <p className="mt-5 text-xs text-muted-foreground">{t(comments.hasNextPage || comments.isError ? '{{count}} comments loaded · Incomplete' : '{{count}} comments loaded', { count: activity.length })}</p>}
+
+              {/* Markdown composer submits once and retains failed drafts */}
+              {canWrite && (
+                <form className="mt-7 space-y-3" aria-busy={commentWrite.isPending}
+                  onSubmit={(event) => { event.preventDefault(); void saveComment() }}>
+                  <label htmlFor="comment-body" className="block text-xs font-medium">{t('Add a comment')}</label>
+
+                  {/* Writing and safe GFM preview share one draft without submitting it */}
+                  <div role="tablist" aria-label={t('Add a comment')} className="flex gap-1 border-b"
+                    onKeyDown={(event) => {
+                      if (commentWrite.isPending || !['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return
+                      event.preventDefault()
+                      const mode = event.key === 'Home' ? 'write' : event.key === 'End' ? 'preview' : commentMode === 'write' ? 'preview' : 'write'
+                      setCommentMode(mode)
+                      event.currentTarget.querySelector<HTMLButtonElement>(`#comment-${mode}-tab`)?.focus()
+                    }}>
+                    {(['write', 'preview'] as const).map((mode) => (
+                      <button key={mode} type="button" role="tab" id={`comment-${mode}-tab`}
+                        aria-selected={commentMode === mode} aria-controls={`comment-${mode}-panel`}
+                        tabIndex={commentMode === mode ? 0 : -1} disabled={commentWrite.isPending}
+                        onClick={() => setCommentMode(mode)}
+                        className={`border-b-2 px-3 py-2 text-xs focus-visible:outline-2 focus-visible:outline-ring disabled:opacity-60 ${
+                          commentMode === mode ? 'border-foreground text-foreground' : 'border-transparent text-muted-foreground hover:text-foreground'
+                        }`}>{t(mode === 'write' ? 'Write' : 'Preview')}</button>
+                    ))}
+                  </div>
+                  <div id="comment-write-panel" role="tabpanel" aria-labelledby="comment-write-tab" hidden={commentMode !== 'write'}>
+                    <textarea id="comment-body" rows={5} value={draftComment} disabled={commentWrite.isPending}
+                      onChange={(event) => setDraftComment(event.target.value)} placeholder={t('Write a comment in Markdown…')}
+                      className="block w-full resize-y rounded-lg border bg-background p-3 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-60" />
+                  </div>
+                  <div id="comment-preview-panel" role="tabpanel" aria-labelledby="comment-preview-tab" tabIndex={0}
+                    hidden={commentMode !== 'preview'} className="min-h-32 min-w-0 rounded-lg border bg-background p-3 focus-visible:outline-2 focus-visible:outline-ring">
+                    {commentMode === 'preview' && (draftComment.trim() ? (
+                      <IssueMarkdown body={draftComment} fullName={issue.full_name} defaultBranch={issue.default_branch} githubUrl={issue.html_url} />
+                    ) : <p className="text-sm text-muted-foreground">{t('Nothing to preview.')}</p>)}
+                  </div>
+
+                  {/* Submission uses the same Markdown from either tab */}
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <span className="text-xs text-muted-foreground">{t('Markdown and GFM supported.')}</span>
+                    <Button type="submit" className="h-8 text-xs" disabled={
+                      commentWrite.isPending || write.isPending || savingMetadata || editingTitle || !draftComment.trim() || !comments.data?.pages.length
+                    }>{t(commentWrite.isPending ? 'Submitting…' : 'Submit comment')}</Button>
+                  </div>
+                  {!comments.data?.pages.length && <p className="text-xs text-muted-foreground">{t('Load comments before submitting.')}</p>}
+                  {commentWrite.error && <p role="alert" className="text-xs text-destructive">{t(commentWrite.error.message)}</p>}
+                  {commentWrite.isSuccess && <p role="status" className="text-xs text-muted-foreground">{t('Comment posted to GitHub.')}</p>}
+                </form>
+              )}
             </section>
           </article>
 
-          {/* Status editing and read-only metadata remain distinct from the Markdown body */}
+          {/* Issue properties retain separate status and ordinary metadata controls */}
           <aside aria-label={t('Properties')} className="min-w-0 border-t pt-6 xl:border-t-0 xl:border-l xl:pt-0 xl:pl-6">
             <h2 className="mb-5 text-xs font-semibold">{t('Properties')}</h2>
             <dl className="space-y-5 text-xs">
               {/* The current status directly opens its available transitions */}
               <div><dt className="mb-2 text-muted-foreground">{t('Status')}</dt><dd>
                 {canWrite ? (
-                  <Select value={mapped?.status ?? ''} disabled={write.isPending || editingTitle || detail.isFetching}
+                  <Select value={mapped?.status ?? ''} disabled={write.isPending || savingMetadata || editingTitle || detail.isFetching}
                     onValueChange={(value) => {
                       write.reset()
                       setDuplicateNumber('')
@@ -315,13 +455,105 @@ export function IssueDetail({
 
               <div><dt className="mb-2 text-muted-foreground">{t('GitHub state')}</dt><dd>{issue.state}</dd></div>
               <div><dt className="mb-2 text-muted-foreground">{t('State reason')}</dt><dd>{issue.state_reason ?? '—'}</dd></div>
-              <div><dt className="mb-2 text-muted-foreground">{t('Assignees')}</dt><dd className="space-y-2">
-                {issue.assignees.length ? issue.assignees.map((user) => <a key={user.id} href={`https://github.com/${encodeURIComponent(user.login)}`} target="_blank" rel="noopener noreferrer" className="flex items-center gap-2 break-all hover:underline"><img src={`https://avatars.githubusercontent.com/u/${user.id}?s=48`} alt="" className="size-5 rounded-full" loading="lazy" referrerPolicy="no-referrer" />{user.login}</a>) : t('Unassigned')}
+              {/* Searchable multi-selection for repository users and ordinary labels */}
+              {(['assignees', 'labels'] as const).map((kind) => (
+                <div key={kind} ref={selector === kind ? selectorRef : null} className="relative"><dt className="mb-2 text-muted-foreground">{t(kind === 'labels' ? 'Labels' : 'Assignees')}</dt><dd>
+                  <button type="button" aria-label={t(kind === 'labels' ? 'Manage labels' : 'Manage assignees')}
+                    aria-expanded={selector === kind} aria-controls={`${kind}-selector`} disabled={!canWrite || editingTitle || savingMetadata || write.isPending || commentWrite.isPending}
+                    onClick={() => { if (!metadataSubmitting.current) { setSelector(selector === kind ? null : kind); setSearch('') } }}
+                    className={`-ml-1 flex min-h-8 w-full items-center rounded-md border p-1 text-left enabled:hover:border-border enabled:hover:bg-accent focus-visible:outline-2 focus-visible:outline-ring disabled:opacity-60 ${
+                      (kind === 'labels' ? mapped?.labels.length : issue.assignees.length) ? 'border-transparent' : 'border-border'
+                    }`}>
+                    <span className="flex min-w-0 flex-1 flex-wrap items-center gap-1.5">
+                      {kind === 'labels' ? (mapped?.labels.length ? mapped.labels.map((label) => (
+                        <span key={label.id ?? label.name} className="inline-flex max-w-full items-center gap-1.5 rounded-full border px-2 py-1">
+                          <span className="size-1.5 shrink-0 rounded-full bg-muted-foreground" style={label.color ? { backgroundColor: `#${label.color}` } : undefined} />
+                          <span className="break-all">{label.name}</span>
+                        </span>
+                      )) : <span className="px-1">{t('No labels')}</span>) : (issue.assignees.length ? issue.assignees.map((user) => (
+                        <span key={user.id} className="flex items-center gap-2 break-all"><img src={`https://avatars.githubusercontent.com/u/${user.id}?s=48`} alt="" className="size-5 rounded-full" loading="lazy" referrerPolicy="no-referrer" />{user.login}</span>
+                      )) : <span className="px-1">{t('Unassigned')}</span>)}
+                    </span>
+                  </button>
+
+                  {/* Choices remain local until saved; ordinary dismissal preserves both cards' drafts */}
+                  {selector === kind && (
+                    <fieldset id={`${kind}-selector`} aria-label={t(kind === 'labels' ? 'Manage labels' : 'Manage assignees')}
+                      disabled={savingMetadata || write.isPending || commentWrite.isPending} aria-busy={savingMetadata}
+                      onKeyDown={(event) => { if (event.key === 'Escape' && !metadataSubmitting.current) setSelector(null) }}
+                      className="absolute right-0 z-20 mt-2 w-72 min-w-0 max-w-[85vw] rounded-lg border bg-card p-3 shadow-xl">
+                      <div className="mb-3 flex items-center gap-2">
+                        <input autoFocus aria-label={t(kind === 'labels' ? 'Search labels' : 'Search assignees')} value={search}
+                          onChange={(event) => setSearch(event.target.value)} placeholder={t(kind === 'labels' ? 'Search labels' : 'Search assignees')}
+                          className="min-w-0 flex-1 rounded-md border bg-background px-2 py-2 outline-none focus-visible:ring-2 focus-visible:ring-ring" />
+                        <button type="button" onClick={() => setSelector(null)} aria-label={t('Close selector')} className="rounded px-2 py-2 hover:bg-accent">×</button>
+                      </div>
+                      {options.error && <div role="alert" className="space-y-2 py-2 text-destructive"><p>{t(options.error.message)}</p>
+                        <Button variant="outline" className="h-7 text-xs" disabled={options.isFetching} onClick={() => void options.refetch()}>{t('Retry')}</Button>
+                      </div>}
+                      <div className="max-h-56 overflow-y-auto">
+                        {kind === 'labels' ? options.data?.labels.filter((label) => label.name.toLowerCase().includes(search.toLowerCase())).map((label) => (
+                          <label key={label.id} className="flex cursor-pointer items-center gap-2 rounded p-2 hover:bg-accent">
+                            <input type="checkbox" checked={metadataDrafts.labels.get(label.name) ?? !!mapped?.labels.some((item) => item.id === label.id || item.name.toLowerCase() === label.name.toLowerCase())}
+                              disabled={!canWrite || editingTitle || write.isPending || commentWrite.isPending || detail.isFetching || !!options.error}
+                              onChange={(event) => changeMetadata('labels', label.name, event.target.checked)} />
+                            <span className="size-2 shrink-0 rounded-full" style={{ backgroundColor: `#${label.color}` }} /><span className="break-all">{label.name}</span>
+                          </label>
+                        )) : assigneeOptions.filter((user) => user.login.toLowerCase().includes(search.toLowerCase())).map((user) => (
+                          <label key={user.id} className="flex cursor-pointer items-center gap-2 rounded p-2 hover:bg-accent">
+                            <input type="checkbox" checked={metadataDrafts.assignees.get(user.login) ?? issue.assignees.some((item) => item.id === user.id)}
+                              disabled={!canWrite || editingTitle || write.isPending || commentWrite.isPending || detail.isFetching || !!options.error}
+                              onChange={(event) => changeMetadata('assignees', user.login, event.target.checked)} />
+                            <img src={`https://avatars.githubusercontent.com/u/${user.id}?s=48`} alt="" className="size-5 rounded-full" loading="lazy" referrerPolicy="no-referrer" /><span className="break-all">{user.login}</span>
+                          </label>
+                        ))}
+                        {options.isSuccess && !options.isFetching && !(kind === 'labels' ? options.data.labels.some((label) => label.name.toLowerCase().includes(search.toLowerCase())) : assigneeOptions.some((user) => user.login.toLowerCase().includes(search.toLowerCase()))) &&
+                          <p className="py-3 text-muted-foreground">{t(kind === 'labels' ? 'No matching repository labels.' : 'No matching assignable users.')}</p>}
+
+                        {/* Loading stays below the available options without blocking selection */}
+                        {options.isFetching && (
+                          <div role="status">
+                            <div className="flex items-center gap-2 p-2">
+                              <Skeleton className="size-3.5 shrink-0 rounded-sm" />
+                              <Skeleton className={kind === 'labels' ? 'size-2 shrink-0 rounded-full' : 'size-5 shrink-0 rounded-full'} />
+                              <Skeleton className="h-3 w-24" />
+                            </div>
+                            <span className="sr-only">{t('Loading…')}</span>
+                          </div>
+                        )}
+                      </div>
+
+                      {/* Only Save writes changes; Cancel explicitly discards the current card's draft */}
+                      <div className="mt-3 flex justify-end gap-2 border-t pt-3">
+                        <Button type="button" variant="outline" className="h-8 text-xs" onClick={() => cancelMetadata(kind)}>{t('Cancel')}</Button>
+                        <Button type="button" className="h-8 text-xs" disabled={!canWrite || editingTitle || detail.isFetching || metadataChanges[kind].length === 0}
+                          onClick={() => void saveMetadata(kind)}>{t(savingMetadata ? 'Saving…' : 'Save')}</Button>
+                      </div>
+                      {write.error && <p role="alert" className="mt-2 text-destructive">{t(write.error.message)}</p>}
+
+                      {/* Cover the entire card during saving while retaining its opaque background */}
+                      {savingMetadata && <div aria-hidden="true" className="absolute inset-0 z-10 cursor-wait rounded-lg bg-background/60" />}
+                    </fieldset>
+                  )}
+                </dd></div>
+              ))}
+
+              {/* Author identity is available on hover or focus without adding another text row */}
+              <div><dt className="mb-2 text-muted-foreground">{t('Author')}</dt><dd>
+                {issue.author ? (
+                  <TooltipProvider delayDuration={300}>
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <a href={`https://github.com/${encodeURIComponent(issue.author.login)}`} target="_blank" rel="noopener noreferrer"
+                          aria-label={issue.author.login} className="inline-flex rounded-full focus-visible:outline-2 focus-visible:outline-ring">
+                          <img src={`https://avatars.githubusercontent.com/u/${issue.author.id}?s=64`} alt="" className="size-6 rounded-full" loading="lazy" referrerPolicy="no-referrer" />
+                        </a>
+                      </TooltipTrigger>
+                      <TooltipContent side="bottom">{issue.author.login}</TooltipContent>
+                    </Tooltip>
+                  </TooltipProvider>
+                ) : t('Deleted user')}
               </dd></div>
-              <div><dt className="mb-2 text-muted-foreground">{t('Labels')}</dt><dd className="flex flex-wrap gap-1.5">
-                {issue.labels.length ? issue.labels.map((label) => <span key={label.id ?? label.name} className="inline-flex max-w-full items-center gap-1.5 rounded-full border px-2 py-1"><span className="size-1.5 shrink-0 rounded-full bg-muted-foreground" style={label.color ? { backgroundColor: `#${label.color}` } : undefined} /><span className="break-all">{label.name}</span></span>) : t('No labels')}
-              </dd></div>
-              <div><dt className="mb-2 text-muted-foreground">{t('Author')}</dt><dd className="break-all">{issue.author ? <a href={`https://github.com/${encodeURIComponent(issue.author.login)}`} target="_blank" rel="noopener noreferrer" className="hover:underline">{issue.author.login}</a> : t('Deleted user')}</dd></div>
               <div><dt className="mb-2 text-muted-foreground">{t('Created')}</dt><dd><time dateTime={issue.created_at}>{date(issue.created_at)}</time></dd></div>
               <div><dt className="mb-2 text-muted-foreground">{t('Updated')}</dt><dd><time dateTime={issue.updated_at}>{date(issue.updated_at)}</time></dd></div>
               {issue.closed_at && <div><dt className="mb-2 text-muted-foreground">{t('Closed')}</dt><dd><time dateTime={issue.closed_at}>{date(issue.closed_at)}</time></dd></div>}
