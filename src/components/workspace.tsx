@@ -225,7 +225,9 @@ export function Workspace({
 }: {
   userId: string
   repository: {
-    id: number; full_name: string; private: boolean
+    id: number
+    full_name: string
+    private: boolean
     permissions: Record<string, boolean>
     installations: { permissions: Record<string, string> }[]
   }
@@ -236,11 +238,15 @@ export function Workspace({
   useLayoutEffect(() => {
     const positions = scrollPositions.current
     window.scrollTo(0, positions.get(repository.id) ?? 0)
-    return () => { positions.set(repository.id, window.scrollY) }
+    return () => {
+      positions.set(repository.id, window.scrollY)
+    }
   }, [repository.id, scrollPositions])
-  const canWrite = repository.permissions.push && repository.installations.some(
-    (installation) => installation.permissions.issues === 'write',
-  )
+  const canWrite =
+    repository.permissions.push &&
+    repository.installations.some(
+      (installation) => installation.permissions.issues === 'write',
+    )
   const [stored, setStored] = useState(() =>
     readWorkspacePreferences(userId, repository.id),
   )
@@ -302,13 +308,16 @@ export function Workspace({
       const results = await Promise.allSettled(
         [
           open,
-          ...([
-            ['done', done],
-            ['canceled', canceled],
-            ['duplicate', duplicate],
-          ] as const)
+          ...(
+            [
+              ['done', done],
+              ['canceled', canceled],
+              ['duplicate', duplicate],
+            ] as const
+          )
             .filter(
-              ([id, query]) => stored.preferences.expandedGroups[id] && query.data,
+              ([id, query]) =>
+                stored.preferences.expandedGroups[id] && query.data,
             )
             .map(([, query]) => query),
         ].map(async (query) => {
@@ -387,7 +396,13 @@ export function Workspace({
       </header>
 
       {/* Read-only repositories do not offer write controls */}
-      {!canWrite && <p className="mt-3 text-xs text-muted-foreground">{t('Writing requires repository push access and App Issues write permission. Check access in GitHub.')}</p>}
+      {!canWrite && (
+        <p className="mt-3 text-xs text-muted-foreground">
+          {t(
+            'Writing requires repository push access and App Issues write permission. Check access in GitHub.',
+          )}
+        </p>
+      )}
 
       {/* List settings and Open loading progress */}
       <section
@@ -400,7 +415,14 @@ export function Workspace({
           </h2>
           <div className="flex flex-wrap items-center gap-2">
             {/* Issue creation requires both user and App write access */}
-            {canWrite && <NewIssue userId={userId} repositoryId={repository.id} fullName={repository.full_name} onSessionExpired={onSessionExpired} />}
+            {canWrite && (
+              <NewIssue
+                userId={userId}
+                repositoryId={repository.id}
+                fullName={repository.full_name}
+                onSessionExpired={onSessionExpired}
+              />
+            )}
 
             <Button
               variant="outline"
@@ -679,7 +701,16 @@ export function Workspace({
                     {/* Only this Closed group's query advances when its pagination row is clicked */}
                     {closedGroup && (
                       <>
-                        {searchPending && <p role="status" className="border-t px-4 py-3 text-xs text-muted-foreground">{t('GitHub search is catching up. Confirmed changes are retained; refresh later to revalidate this group.')}</p>}
+                        {searchPending && (
+                          <p
+                            role="status"
+                            className="border-t px-4 py-3 text-xs text-muted-foreground"
+                          >
+                            {t(
+                              'GitHub search is catching up. Confirmed changes are retained; refresh later to revalidate this group.',
+                            )}
+                          </p>
+                        )}
 
                         {searchLimited && (
                           <p
@@ -711,7 +742,9 @@ export function Workspace({
                             })}
                             className="h-11 w-full rounded-none border-x-0 border-b-0 text-xs text-muted-foreground shadow-none"
                             disabled={
-                              listRefreshing || query.isFetching || query.isPaused
+                              listRefreshing ||
+                              query.isFetching ||
+                              query.isPaused
                             }
                             onClick={() =>
                               void (query.data

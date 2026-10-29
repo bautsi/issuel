@@ -47,7 +47,10 @@ export function useIssues(
   const options = {
     queryKey,
     queryFn: async (
-      context: QueryFunctionContext<typeof queryKey | typeof refreshKey, number>,
+      context: QueryFunctionContext<
+        typeof queryKey | typeof refreshKey,
+        number
+      >,
     ) => {
       // Let StrictMode's synchronous remount reuse the request before consuming its abort signal.
       await Promise.resolve()
@@ -70,50 +73,98 @@ export function useIssues(
         closedCategory,
       )
       // Recent successful mutations bridge Search indexing delay without seeding fake pages.
-      const writes = client.getMutationCache().getAll().filter((mutation) => {
-        const key = mutation.options.mutationKey
-        return key?.[0] === 'github' && key[1] === userId && key[2] === repositoryId &&
-          key[3] === 'write' && mutation.state.status === 'success'
-      }).map((mutation) => mutation.state.data as IssueDetail)
+      const writes = client
+        .getMutationCache()
+        .getAll()
+        .filter((mutation) => {
+          const key = mutation.options.mutationKey
+          return (
+            key?.[0] === 'github' &&
+            key[1] === userId &&
+            key[2] === repositoryId &&
+            key[3] === 'write' &&
+            mutation.state.status === 'success'
+          )
+        })
+        .map((mutation) => mutation.state.data as IssueDetail)
       const numbers = [...new Set(writes.map((issue) => issue.number))]
       if (pageParam === 1) {
         // Refresh only recently written resources, so another user's later edit is respected too.
-        await Promise.all(numbers.map((number) => client.fetchQuery({
-          queryKey: ['github', userId, repositoryId, 'issue', number],
-          staleTime: 0,
-          retry: false,
-          queryFn: async ({ signal }): Promise<IssueDetail> => {
-            const data = await requestIssueRead(`/api/repositories/${repositoryId}/issues/${number}`, signal)
-            if (data?.userId !== userId)
-              throw new IssueReadError('Your GitHub session changed. Connect GitHub again.', 401)
-            if (data.repositoryId !== repositoryId || data.issue?.number !== number)
-              throw new IssueReadError('The server returned invalid issue content.', 502)
-            return data.issue
-          },
-        })))
+        await Promise.all(
+          numbers.map((number) =>
+            client.fetchQuery({
+              queryKey: ['github', userId, repositoryId, 'issue', number],
+              staleTime: 0,
+              retry: false,
+              queryFn: async ({ signal }): Promise<IssueDetail> => {
+                const data = await requestIssueRead(
+                  `/api/repositories/${repositoryId}/issues/${number}`,
+                  signal,
+                )
+                if (data?.userId !== userId)
+                  throw new IssueReadError(
+                    'Your GitHub session changed. Connect GitHub again.',
+                    401,
+                  )
+                if (
+                  data.repositoryId !== repositoryId ||
+                  data.issue?.number !== number
+                )
+                  throw new IssueReadError(
+                    'The server returned invalid issue content.',
+                    502,
+                  )
+                return data.issue
+              },
+            }),
+          ),
+        )
       }
       const known = numbers.flatMap((number) => {
-        const issue = client.getQueryData<IssueDetail>(['github', userId, repositoryId, 'issue', number])
+        const issue = client.getQueryData<IssueDetail>([
+          'github',
+          userId,
+          repositoryId,
+          'issue',
+          number,
+        ])
         return issue ? [issue] : []
       })
       const latest = new Map(known.map((issue) => [issue.id, issue]))
-      const issues = page.issues.map((issue) => {
-        const detail = latest.get(issue.id)
-        return detail && detail.updated_at >= issue.updated_at ? detail : issue
-      }).filter((issue) => issue.state === state &&
-        (!closedCategory || getIssueStatus(issue).status === closedCategory))
+      const issues = page.issues
+        .map((issue) => {
+          const detail = latest.get(issue.id)
+          return detail && detail.updated_at >= issue.updated_at
+            ? detail
+            : issue
+        })
+        .filter(
+          (issue) =>
+            issue.state === state &&
+            (!closedCategory ||
+              getIssueStatus(issue).status === closedCategory),
+        )
       if (pageParam === 1) {
         for (const issue of known) {
-          if (issue.state === state && (!closedCategory || getIssueStatus(issue).status === closedCategory) &&
-            !page.issues.some((item) => item.id === issue.id)) issues.push(issue)
+          if (
+            issue.state === state &&
+            (!closedCategory ||
+              getIssueStatus(issue).status === closedCategory) &&
+            !page.issues.some((item) => item.id === issue.id)
+          )
+            issues.push(issue)
         }
       }
-      const searchPending = page.searchPending || (state === 'closed' && (
-        issues.length !== page.issues.length || issues.some((issue, index) =>
-          issue.id !== page.issues[index]?.id || issue.updated_at !== page.issues[index]?.updated_at ||
-          issue.state_reason !== page.issues[index]?.state_reason,
-        )
-      ))
+      const searchPending =
+        page.searchPending ||
+        (state === 'closed' &&
+          (issues.length !== page.issues.length ||
+            issues.some(
+              (issue, index) =>
+                issue.id !== page.issues[index]?.id ||
+                issue.updated_at !== page.issues[index]?.updated_at ||
+                issue.state_reason !== page.issues[index]?.state_reason,
+            )))
       return { ...page, issues, searchPending }
     },
     initialPageParam: 1,

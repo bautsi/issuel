@@ -4,7 +4,10 @@ import remarkGfm from 'remark-gfm'
 
 /** Render GFM with syntax highlighting, safe URLs and repository-relative resources. */
 export function IssueMarkdown({
-  body, fullName, defaultBranch, githubUrl,
+  body,
+  fullName,
+  defaultBranch,
+  githubUrl,
 }: {
   body: string
   fullName: string
@@ -13,9 +16,14 @@ export function IssueMarkdown({
 }) {
   /** Allow web links and mail links, resolving relative files against the repository default branch. */
   function resolveUrl(value: string, key: string) {
-    if (!value || Array.from(value).some((character) =>
-      character.charCodeAt(0) <= 32 || character.charCodeAt(0) === 127,
-    )) return ''
+    if (
+      !value ||
+      Array.from(value).some(
+        (character) =>
+          character.charCodeAt(0) <= 32 || character.charCodeAt(0) === 127,
+      )
+    )
+      return ''
     const image = key === 'src'
     try {
       let url: URL
@@ -28,12 +36,21 @@ export function IssueMarkdown({
         url = new URL(value, 'https://github.com')
       } else {
         const branch = encodeURIComponent(defaultBranch)
-        url = new URL(value, `https://github.com/${fullName}/${image ? 'raw' : 'blob'}/${branch}/`)
+        url = new URL(
+          value,
+          `https://github.com/${fullName}/${image ? 'raw' : 'blob'}/${branch}/`,
+        )
       }
       if (url.username || url.password) return ''
       if (image && url.origin === 'https://github.com')
-        url.pathname = url.pathname.replace(/^(\/[^/]+\/[^/]+)\/blob\//, '$1/raw/')
-      if (url.protocol === 'https:' || (!image && ['http:', 'mailto:'].includes(url.protocol)))
+        url.pathname = url.pathname.replace(
+          /^(\/[^/]+\/[^/]+)\/blob\//,
+          '$1/raw/',
+        )
+      if (
+        url.protocol === 'https:' ||
+        (!image && ['http:', 'mailto:'].includes(url.protocol))
+      )
         return url.href
     } catch {
       return ''
@@ -49,15 +66,40 @@ export function IssueMarkdown({
         skipHtml
         urlTransform={resolveUrl}
         components={{
-          a: ({ href, children, title }) => href ? (
-            <a href={href} title={title} target="_blank" rel="noopener noreferrer">{children}</a>
-          ) : <span>{children}</span>,
-          img: ({ src, alt, title }) => src ? (
-            <a href={src} target="_blank" rel="noopener noreferrer">
-              <img src={src} alt={alt ?? ''} title={title} loading="lazy" referrerPolicy="no-referrer" />
-            </a>
-          ) : <a href={githubUrl} target="_blank" rel="noopener noreferrer">{alt || 'GitHub'}</a>,
-          table: ({ children }) => <div className="overflow-x-auto"><table>{children}</table></div>,
+          a: ({ href, children, title }) =>
+            href ? (
+              <a
+                href={href}
+                title={title}
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                {children}
+              </a>
+            ) : (
+              <span>{children}</span>
+            ),
+          img: ({ src, alt, title }) =>
+            src ? (
+              <a href={src} target="_blank" rel="noopener noreferrer">
+                <img
+                  src={src}
+                  alt={alt ?? ''}
+                  title={title}
+                  loading="lazy"
+                  referrerPolicy="no-referrer"
+                />
+              </a>
+            ) : (
+              <a href={githubUrl} target="_blank" rel="noopener noreferrer">
+                {alt || 'GitHub'}
+              </a>
+            ),
+          table: ({ children }) => (
+            <div className="overflow-x-auto">
+              <table>{children}</table>
+            </div>
+          ),
         }}
       >
         {body}

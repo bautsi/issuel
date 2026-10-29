@@ -40,8 +40,10 @@ export function WorkspaceSelector({
   const detailMatch = useMatch('/workspace/:owner/:repo/issue/:number')
   const match = listMatch ?? detailMatch
   const issueNumber = detailMatch?.params.number
-  const validIssueNumber = issueNumber !== undefined &&
-    /^[1-9]\d*$/.test(issueNumber) && Number.isSafeInteger(Number(issueNumber))
+  const validIssueNumber =
+    issueNumber !== undefined &&
+    /^[1-9]\d*$/.test(issueNumber) &&
+    Number.isSafeInteger(Number(issueNumber))
   const scrollPositions = useRef(new Map<number, number>())
   const owner = match?.params.owner
   const name = match?.params.repo
@@ -143,7 +145,8 @@ export function WorkspaceSelector({
             ? (discovery.repositories.find((item) =>
                 historyId
                   ? String(item.id) === historyId
-                  : item.full_name.toLowerCase() === `${owner}/${name}`.toLowerCase(),
+                  : item.full_name.toLowerCase() ===
+                    `${owner}/${name}`.toLowerCase(),
               ) ?? null)
             : null
         let data = { ...discovery, repository }
@@ -161,7 +164,10 @@ export function WorkspaceSelector({
               const data = await response.json()
               if (
                 !response.ok &&
-                !(response.status === 404 && data.error === 'workspace_not_found')
+                !(
+                  response.status === 404 &&
+                  data.error === 'workspace_not_found'
+                )
               )
                 throw new IssueReadError(
                   response.status === 429
@@ -176,7 +182,9 @@ export function WorkspaceSelector({
                 )
               if (!Array.isArray(data.repositories))
                 throw new Error('Unable to load repositories. Please retry.')
-              return data as typeof discovery & { repository: Repository | null }
+              return data as typeof discovery & {
+                repository: Repository | null
+              }
             },
           })
           client.setQueryData(['github', userId, 'repositories'], data)
@@ -269,18 +277,21 @@ export function WorkspaceSelector({
   ])
 
   // Route changes can reuse discovered metadata before the asynchronous cache lookup settles.
-  const selected =
-    !error
-      ? repositories.find((repository) =>
-          owner && name
-            ? historyId
-              ? String(repository.id) === historyId
-              : repository.full_name.toLowerCase() === `${owner}/${name}`.toLowerCase()
-            : false,
-        ) ?? (!loading
-          ? repositories.find((repository) => String(repository.id) === selectedId)
-          : undefined)
-      : undefined
+  const selected = !error
+    ? (repositories.find((repository) =>
+        owner && name
+          ? historyId
+            ? String(repository.id) === historyId
+            : repository.full_name.toLowerCase() ===
+              `${owner}/${name}`.toLowerCase()
+          : false,
+      ) ??
+      (!loading
+        ? repositories.find(
+            (repository) => String(repository.id) === selectedId,
+          )
+        : undefined))
+    : undefined
   const filtered = repositories.filter((repository) =>
     repository.full_name.toLowerCase().includes(search.trim().toLowerCase()),
   )
@@ -319,15 +330,19 @@ export function WorkspaceSelector({
   const workspacePath = selected
     ? `/workspace/${encodeURIComponent(selected.owner)}/${encodeURIComponent(selected.name)}`
     : null
-  const canonicalPath = workspacePath && detailMatch
-    ? `${workspacePath}/issue/${issueNumber}`
-    : workspacePath
+  const canonicalPath =
+    workspacePath && detailMatch
+      ? `${workspacePath}/issue/${issueNumber}`
+      : workspacePath
   return (
     <div className="grid min-h-[calc(100svh-3.5rem)] md:grid-cols-[13.5rem_minmax(0,1fr)]">
       {/* Normalize history without replacing the workspace layout */}
-      {selected && canonicalPath &&
+      {selected &&
+        canonicalPath &&
         (location.pathname === '/' ||
-          (match && (location.pathname !== canonicalPath || historyId !== String(selected.id)))) && (
+          (match &&
+            (location.pathname !== canonicalPath ||
+              historyId !== String(selected.id)))) && (
           <Navigate
             to={canonicalPath}
             replace
@@ -560,19 +575,24 @@ export function WorkspaceSelector({
       </aside>
 
       {/* Reuse known repository metadata; protected issue reads still verify access */}
-      <main className="min-w-0 p-5 sm:p-6 lg:p-8" aria-busy={loading && !selected}>
+      <main
+        className="min-w-0 p-5 sm:p-6 lg:p-8"
+        aria-busy={loading && !selected}
+      >
         {detailMatch && validIssueNumber && !error && (loading || selected) ? (
           <IssueDetail
             key={`${userId}:${owner}:${name}:${issueNumber}`}
             userId={userId}
-            repository={selected ?? {
-              id: null,
-              owner: owner ?? '',
-              name: name ?? '',
-              full_name: `${owner}/${name}`,
-              permissions: {},
-              installations: [],
-            }}
+            repository={
+              selected ?? {
+                id: null,
+                owner: owner ?? '',
+                name: name ?? '',
+                full_name: `${owner}/${name}`,
+                permissions: {},
+                installations: [],
+              }
+            }
             number={Number(issueNumber)}
             onSessionExpired={onSessionExpired}
           />
@@ -605,7 +625,8 @@ export function WorkspaceSelector({
           <h1 className="text-xl font-semibold">
             {t('Workspace unavailable')}
           </h1>
-        ) : (location.pathname !== '/' && !match) || (detailMatch && !validIssueNumber) ? (
+        ) : (location.pathname !== '/' && !match) ||
+          (detailMatch && !validIssueNumber) ? (
           <div>
             <h1 className="text-xl font-semibold">{t('Page not found')}</h1>
             <Link to="/" className="mt-4 inline-block underline">

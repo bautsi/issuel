@@ -16,7 +16,11 @@ import {
   resolveWorkspace,
 } from './repositories.ts'
 import { readIssues } from './issues.ts'
-import { readIssueComments, readIssueDetail, readIssueOptions } from './issue-detail.ts'
+import {
+  readIssueComments,
+  readIssueDetail,
+  readIssueOptions,
+} from './issue-detail.ts'
 import { createIssue, createIssueComment, updateIssue } from './issue-writes.ts'
 import { defaultStatuses } from './issue-status.ts'
 import { githubFetch } from './logging.ts'
@@ -642,11 +646,22 @@ export function createAuth() {
     ],
     async (c) => {
       const writing = c.req.method !== 'GET'
-      if (writing && !(
-        (c.req.method === 'POST' && /^\/api\/repositories\/[1-9]\d*\/issues$/.test(c.req.path)) ||
-        (c.req.method === 'POST' && /^\/api\/repositories\/[1-9]\d*\/issues\/[1-9]\d*\/comments$/.test(c.req.path)) ||
-        (c.req.method === 'PATCH' && /^\/api\/repositories\/[1-9]\d*\/issues\/[1-9]\d*$/.test(c.req.path))
-      )) return c.json({ error: 'Not found' }, 404)
+      if (
+        writing &&
+        !(
+          (c.req.method === 'POST' &&
+            /^\/api\/repositories\/[1-9]\d*\/issues$/.test(c.req.path)) ||
+          (c.req.method === 'POST' &&
+            /^\/api\/repositories\/[1-9]\d*\/issues\/[1-9]\d*\/comments$/.test(
+              c.req.path,
+            )) ||
+          (c.req.method === 'PATCH' &&
+            /^\/api\/repositories\/[1-9]\d*\/issues\/[1-9]\d*$/.test(
+              c.req.path,
+            ))
+        )
+      )
+        return c.json({ error: 'Not found' }, 404)
       if (!config) throw new AuthError('auth_not_configured')
       const id = cookieId(c, sessionCookie)
       if (!id) {
@@ -715,24 +730,51 @@ export function createAuth() {
             return c.json({ error: 'github_forbidden' }, 403)
           }
           if (writing) {
-            if (!repository.permissions.push || !repository.installations.some(
-              (installation) => installation.permissions.issues === 'write',
-            )) return c.json({ error: 'issues_write_required' }, 403)
+            if (
+              !repository.permissions.push ||
+              !repository.installations.some(
+                (installation) => installation.permissions.issues === 'write',
+              )
+            )
+              return c.json({ error: 'issues_write_required' }, 403)
             if (!c.req.header('Content-Type')?.startsWith('application/json'))
               return c.json({ error: 'invalid_issue_write' }, 400)
             const input: unknown = await c.req.json().catch(() => null)
             result = {
               ...(c.req.path.endsWith('/comments')
-                ? { comment: await createIssueComment(token, repository.id, Number(issueNumber), input), number: Number(issueNumber) }
-                : { issue: issueNumber === undefined
-                    ? await createIssue(token, repository.id, input)
-                    : await updateIssue(token, repository.id, Number(issueNumber), input) }),
+                ? {
+                    comment: await createIssueComment(
+                      token,
+                      repository.id,
+                      Number(issueNumber),
+                      input,
+                    ),
+                    number: Number(issueNumber),
+                  }
+                : {
+                    issue:
+                      issueNumber === undefined
+                        ? await createIssue(token, repository.id, input)
+                        : await updateIssue(
+                            token,
+                            repository.id,
+                            Number(issueNumber),
+                            input,
+                          ),
+                  }),
               userId: session.github_user_id,
               repositoryId: repository.id,
             }
-          } else if (c.req.path.endsWith('/labels') || c.req.path.endsWith('/assignees')) {
+          } else if (
+            c.req.path.endsWith('/labels') ||
+            c.req.path.endsWith('/assignees')
+          ) {
             result = {
-              ...(await readIssueOptions(token, repository.id, c.req.path.endsWith('/labels') ? 'labels' : 'assignees')),
+              ...(await readIssueOptions(
+                token,
+                repository.id,
+                c.req.path.endsWith('/labels') ? 'labels' : 'assignees',
+              )),
               userId: session.github_user_id,
               repositoryId: repository.id,
             }
@@ -740,7 +782,11 @@ export function createAuth() {
             if (c.req.path.endsWith('/comments')) {
               result = {
                 ...(await readIssueComments(
-                  token, repository.id, Number(issueNumber), Number(page), Number(perPage),
+                  token,
+                  repository.id,
+                  Number(issueNumber),
+                  Number(page),
+                  Number(perPage),
                 )),
                 userId: session.github_user_id,
                 repositoryId: repository.id,
@@ -748,7 +794,11 @@ export function createAuth() {
               }
             } else {
               result = {
-                issue: await readIssueDetail(token, repository.id, Number(issueNumber)),
+                issue: await readIssueDetail(
+                  token,
+                  repository.id,
+                  Number(issueNumber),
+                ),
                 userId: session.github_user_id,
                 repositoryId: repository.id,
               }

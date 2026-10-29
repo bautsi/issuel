@@ -37,7 +37,10 @@ export class RepositoryError extends Error {
 export async function githubResponse(
   path: string,
   accessToken: string,
-  write?: { method: 'POST' | 'PATCH' | 'DELETE'; body: Record<string, unknown> },
+  write?: {
+    method: 'POST' | 'PATCH' | 'DELETE'
+    body: Record<string, unknown>
+  },
 ) {
   let response: Response
   try {
@@ -72,7 +75,10 @@ export async function githubResponse(
       }
     }
   } catch {
-    throw new RepositoryError(write ? 'github_write_uncertain' : 'github_unavailable', 503)
+    throw new RepositoryError(
+      write ? 'github_write_uncertain' : 'github_unavailable',
+      503,
+    )
   }
   const body: unknown = await response.json().catch(() => null)
   const data =

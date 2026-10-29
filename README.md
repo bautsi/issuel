@@ -26,14 +26,14 @@ Run commands from the project root.
 
 1. Register a [GitHub App](https://github.com/settings/apps/new) with these local development settings:
 
-   | Setting | Value |
-   | --- | --- |
-   | Homepage URL | `http://localhost:5173` |
-   | Callback URL | `http://localhost:5173/api/auth/callback` |
-   | Expire user authorization tokens | Enabled |
-   | Request user authorization during installation | Disabled |
-   | Device flow and webhooks | Disabled |
-   | Setup URL | Empty |
+   | Setting                                        | Value                                     |
+   | ---------------------------------------------- | ----------------------------------------- |
+   | Homepage URL                                   | `http://localhost:5173`                   |
+   | Callback URL                                   | `http://localhost:5173/api/auth/callback` |
+   | Expire user authorization tokens               | Enabled                                   |
+   | Request user authorization during installation | Disabled                                  |
+   | Device flow and webhooks                       | Disabled                                  |
+   | Setup URL                                      | Empty                                     |
 
 2. Grant **Issues: Read and write** repository permission. Metadata read access is implicit.
 3. Copy the App's **Client ID** and generate a **Client secret** for the backend settings below.
@@ -91,17 +91,17 @@ The override applies only to that terminal session and its child processes. Sett
 
 Development loads backend settings from `.env`; production uses process-level settings supplied by the deployment environment.
 
-| Variable | Required / default | Purpose |
-| --- | --- | --- |
-| `GITHUB_APP_CLIENT_ID` | Required | GitHub App Client ID |
-| `GITHUB_APP_CLIENT_SECRET` | Required | GitHub App Client secret |
-| `GITHUB_OAUTH_CALLBACK_URL` | Required | Exact browser-facing URL ending in `/api/auth/callback` |
-| `SESSION_ENCRYPTION_KEY` | Required | 32 random bytes encoded as 64 hexadecimal characters |
-| `GITHUB_APP_SLUG` | Optional | App URL name used to offer an installation link before a user's first installation; must match the configured App |
-| `SQLITE_DATABASE_PATH` | `./data/auth.sqlite` | Persistent authentication database path; `:memory:` is not supported |
-| `SESSION_COOKIE_SECURE` | `true` | Use `false` only for local HTTP development |
-| `NODE_ENV` | Deployment-defined | Use `production` when deploying |
-| `PORT` | `3000` | API port; set in the shell to configure both Hono and the development proxy |
+| Variable                    | Required / default   | Purpose                                                                                                           |
+| --------------------------- | -------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| `GITHUB_APP_CLIENT_ID`      | Required             | GitHub App Client ID                                                                                              |
+| `GITHUB_APP_CLIENT_SECRET`  | Required             | GitHub App Client secret                                                                                          |
+| `GITHUB_OAUTH_CALLBACK_URL` | Required             | Exact browser-facing URL ending in `/api/auth/callback`                                                           |
+| `SESSION_ENCRYPTION_KEY`    | Required             | 32 random bytes encoded as 64 hexadecimal characters                                                              |
+| `GITHUB_APP_SLUG`           | Optional             | App URL name used to offer an installation link before a user's first installation; must match the configured App |
+| `SQLITE_DATABASE_PATH`      | `./data/auth.sqlite` | Persistent authentication database path; `:memory:` is not supported                                              |
+| `SESSION_COOKIE_SECURE`     | `true`               | Use `false` only for local HTTP development                                                                       |
+| `NODE_ENV`                  | Deployment-defined   | Use `production` when deploying                                                                                   |
+| `PORT`                      | `3000`               | API port; set in the shell to configure both Hono and the development proxy                                       |
 
 For local development, use `GITHUB_OAUTH_CALLBACK_URL=http://localhost:5173/api/auth/callback` and `SESSION_COOKIE_SECURE=false`.
 
@@ -117,15 +117,15 @@ Click the current status to choose another status. Duplicate requires the origin
 
 ### Status mapping
 
-| Status | GitHub representation |
-| --- | --- |
-| Backlog | Open without a mapped status label; existing `status:backlog` is also recognized |
-| Todo | Open + `status:todo` |
-| In Progress | Open + `status:in-progress` |
-| In Review | Open + `status:in-review` |
-| Done | Closed + `state_reason: completed` |
-| Canceled | Closed + `state_reason: not_planned` |
-| Duplicate | Closed + `state_reason: duplicate` |
+| Status      | GitHub representation                                                            |
+| ----------- | -------------------------------------------------------------------------------- |
+| Backlog     | Open without a mapped status label; existing `status:backlog` is also recognized |
+| Todo        | Open + `status:todo`                                                             |
+| In Progress | Open + `status:in-progress`                                                      |
+| In Review   | Open + `status:in-review`                                                        |
+| Done        | Closed + `state_reason: completed`                                               |
+| Canceled    | Closed + `state_reason: not_planned`                                             |
+| Duplicate   | Closed + `state_reason: duplicate`                                               |
 
 Open status changes replace only mapped Open labels and preserve ordinary labels and assignees. Backlog does not require creating a label. A missing target label is created only when explicitly needed by a write. Resolve conflicting Open status labels in GitHub before changing Open status.
 
@@ -141,17 +141,24 @@ Lists are cached in memory for the signed-in browser session. Use **Refresh issu
 
 ## Development commands
 
-| Command | Purpose |
-| --- | --- |
-| `pnpm dev` | Start frontend and API with source watching |
-| `pnpm dev:web` | Start Vite only |
-| `pnpm dev:api` | Start the API only |
-| `pnpm lint` | Run ESLint |
-| `pnpm typecheck` | Check frontend and backend TypeScript |
-| `pnpm format:check` | Check Prettier formatting |
-| `pnpm format` | Format project files |
-| `pnpm build` | Build frontend assets and compile the backend |
-| `pnpm start` | Serve the production build |
+| Command             | Purpose                                          |
+| ------------------- | ------------------------------------------------ |
+| `pnpm dev`          | Start frontend and API with source watching      |
+| `pnpm dev:web`      | Start Vite only                                  |
+| `pnpm dev:api`      | Start the API only                               |
+| `pnpm lint`         | Run ESLint                                       |
+| `pnpm check`        | Run lint, frontend/backend type checks and build |
+| `pnpm typecheck`    | Check frontend and backend TypeScript            |
+| `pnpm format:check` | Check Prettier formatting                        |
+| `pnpm format`       | Format project files                             |
+| `pnpm build`        | Build frontend assets and compile the backend    |
+| `pnpm start`        | Serve the production build                       |
+
+`pnpm check` runs every check sequentially, continuing after failures. Output is
+prefixed with the check name, includes the tools' full diagnostics, and reports
+each command's exit code. Frontend and backend type checks both run even if one
+fails. Any failed check makes the overall command fail; the final `ELIFECYCLE`
+line is a summary, with the actual errors shown above it.
 
 The API writes structured request logs to stdout. `X-Request-ID` correlates API and GitHub requests. Logs omit credentials, cookies and request/response bodies.
 
@@ -173,13 +180,13 @@ A single Node.js process serves the API and built SPA on port 3000, or the confi
 
 ## Troubleshooting
 
-| Problem | What to check |
-| --- | --- |
-| Login returns `403 invalid_origin` | Open the Vite frontend on `http://localhost:5173`. Both callback settings must be `http://localhost:5173/api/auth/callback`, even when Hono uses another port. Restart development after configuration changes. |
-| No repositories appear | Confirm the same App is installed on the repository's owning account, the installation is active, organization approval is complete and your GitHub user has access. Then refresh repositories. `GITHUB_APP_SLUG` controls the installation link, not repository access. |
-| Write controls are unavailable | Writing requires repository push access and the App's Issues write permission. |
-| Sessions disappear after restart | Preserve the database directory and the same encryption key. Logout clears Issuel's local session; it does not revoke the GitHub App authorization. |
-| GitHub rate limit error | Wait for the displayed retry time before retrying. |
+| Problem                            | What to check                                                                                                                                                                                                                                                            |
+| ---------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Login returns `403 invalid_origin` | Open the Vite frontend on `http://localhost:5173`. Both callback settings must be `http://localhost:5173/api/auth/callback`, even when Hono uses another port. Restart development after configuration changes.                                                          |
+| No repositories appear             | Confirm the same App is installed on the repository's owning account, the installation is active, organization approval is complete and your GitHub user has access. Then refresh repositories. `GITHUB_APP_SLUG` controls the installation link, not repository access. |
+| Write controls are unavailable     | Writing requires repository push access and the App's Issues write permission.                                                                                                                                                                                           |
+| Sessions disappear after restart   | Preserve the database directory and the same encryption key. Logout clears Issuel's local session; it does not revoke the GitHub App authorization.                                                                                                                      |
+| GitHub rate limit error            | Wait for the displayed retry time before retrying.                                                                                                                                                                                                                       |
 
 ## Project structure
 

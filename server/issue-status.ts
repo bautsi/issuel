@@ -68,7 +68,8 @@ export function getIssueStatus<Label extends { name: string }>(issue: {
 }) {
   const mapped = defaultStatuses.filter(
     (status) =>
-      status.state === 'open' && status.label !== null &&
+      status.state === 'open' &&
+      status.label !== null &&
       issue.labels.some((label) => label.name.toLowerCase() === status.label),
   )
   const labels = issue.labels.filter(

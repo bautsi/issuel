@@ -108,7 +108,12 @@ export default function App() {
 
   /** Confirm draft disposal before invalidating the session and clearing private cached content. */
   async function logout() {
-    if (!window.dispatchEvent(new Event('issuel:before-discard', { cancelable: true }))) return
+    if (
+      !window.dispatchEvent(
+        new Event('issuel:before-discard', { cancelable: true }),
+      )
+    )
+      return
     setLoggingOut(true)
     setError(null)
     try {
@@ -192,7 +197,10 @@ export default function App() {
                   disabled={loggingOut}
                   className="relative inline-flex size-8 shrink-0 items-center justify-center rounded-full bg-muted p-0 outline-none ring-offset-2 ring-offset-background transition-shadow hover:ring-2 hover:ring-foreground/25 focus-visible:ring-2 focus-visible:ring-ring data-[state=open]:ring-2 data-[state=open]:ring-ring disabled:pointer-events-none disabled:opacity-50"
                 >
-                  <span aria-hidden="true" className="text-xs font-medium text-muted-foreground">
+                  <span
+                    aria-hidden="true"
+                    className="text-xs font-medium text-muted-foreground"
+                  >
                     {user.login.slice(0, 1).toUpperCase()}
                   </span>
                   {failedAvatarId !== user.id && (

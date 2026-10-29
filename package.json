@@ -12,9 +12,10 @@
     "dev:web": "vite",
     "dev:api": "node --env-file=.env --input-type=module -e \"import { readConfig } from './server/auth.ts'; try { readConfig() } catch (error) { console.error(error.message); process.exit(1) }\" && node --env-file=.env --watch server/index.ts",
     "lint": "eslint . --max-warnings 0",
+    "check": "concurrently --max-processes 1 --names lint,typecheck,build \"pnpm lint\" \"pnpm typecheck\" \"pnpm build\"",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "typecheck": "tsc --noEmit && tsc -p tsconfig.server.json --noEmit",
+    "typecheck": "concurrently --max-processes 1 --names client,server \"tsc --noEmit --pretty\" \"tsc -p tsconfig.server.json --noEmit --pretty\"",
     "build": "vite build && tsc -p tsconfig.server.json",
     "start": "node dist/server/index.js"
   },

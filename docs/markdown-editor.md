@@ -1,7 +1,7 @@
 # Markdown editor (ISL-10)
 
 GitHub body/comment Markdown remains authoritative. `MarkdownEditor` is controlled
-by a Markdown string and is shared by issue creation, local description editing
+by a Markdown string and is shared by issue creation, explicit description saving
 and new comments. Titles and existing read-only rendering are separate.
 
 ## Extensions and modes
@@ -57,20 +57,21 @@ not navigate while editing.
 
 Issue creation and comment submission retain the existing explicit, single-flight
 Markdown APIs. Failures retain drafts; confirmed comment success clears its draft.
-Description editing is in-memory only: no save button, PATCH, autosave, conflict
-handling or IndexedDB storage is added. Its original source is captured when
-editing starts, so background detail refreshes do not overwrite local edits.
+Description editing uses the ISL-11 workflow documented in
+`description-autosave.md`. Its raw provider baseline is captured when editing
+starts, so background detail refreshes do not overwrite local edits. Drafts
+remain in memory; IndexedDB storage is deferred to ISL-12.
 
 Route changes, browser back/forward, logout and unload warn before discarding
 drafts. Closing the new-issue dialog retains its draft for reopening. Closing a
-modified local description requires confirmation. Browser crashes or revoked
+modified description requires confirmation. Browser crashes or revoked
 sessions cannot provide durable draft recovery; that belongs to ISL-12.
 
 ## Manual acceptance
 
-1. Open `bautsi/linear#196` and select **Edit locally**. Switch between rich and
+1. Open a disposable test issue and select **Edit description**. Switch between rich and
    source without typing; source must remain byte-for-byte unchanged. Do not
-   overwrite its GitHub description.
+   modify production issues for validation.
 2. Edit headings, emphasis, nested lists, checklists, tables and code blocks;
    inspect source, including code language, table alignment, URLs and escaping.
    Change source, then switch back and check the corresponding rich content.
@@ -85,7 +86,8 @@ sessions cannot provide durable draft recovery; that belongs to ISL-12.
    Confirm successful comments clear. Existing comment pagination must still work.
 6. Modify a local description/comment or new-issue draft; navigate, press Back,
    reload or log out. Cancel departure to keep the draft. Confirm departure only
-   when ready to discard. Description UI must never claim it was saved to GitHub.
+   when ready to discard. Description UI must claim Saved only after a provider
+   read or accepted write confirms the exact source.
 
 Requested checks: `pnpm lint`, `pnpm typecheck`, `pnpm build`, each once. Conversion
 checks can use the installed Tiptap/remark packages directly without a new test
