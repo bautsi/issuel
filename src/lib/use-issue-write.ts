@@ -263,7 +263,7 @@ export function useIssueWrite(
   return { ...mutation, submit }
 }
 
-/** Post once and merge the confirmed comment without replacing pagination or refetching issue lists. */
+/** Post once and prepend the confirmed newest comment while retaining older-page cursors. */
 export function useIssueComment(
   userId: string,
   repositoryId: number | null,
@@ -274,7 +274,7 @@ export function useIssueComment(
   const retryLimit = useRef<IssueReadError | null>(null)
   const prefix = ['github', userId, repositoryId] as const
   const detailKey = [...prefix, 'issue', number] as const
-  const commentsKey = [...detailKey, 'comments'] as const
+  const commentsKey = [...detailKey, 'comments', 'newest-first'] as const
   const mutation = useMutation({
     mutationKey: [...prefix, 'comment', number],
     scope: { id: `github:${userId}:${repositoryId}:${number}` },
@@ -367,14 +367,14 @@ export function useIssueComment(
         page.comments.some((item) => item.id === comment.id),
       )
       client.setQueryData<InfiniteData<CommentsPage>>(commentsKey, (data) => {
-        // Keep every GitHub cursor: a confirmed newest comment can follow an incomplete history.
+        // Preserve older-page cursors, including when this creation crosses a GitHub page boundary.
         if (!data?.pages.length) return data
         if (alreadyPresent) return data
         return {
           ...data,
           pages: data.pages.map((page, index) =>
-            index === data.pages.length - 1
-              ? { ...page, comments: [...page.comments, comment] }
+            index === 0
+              ? { ...page, comments: [comment, ...page.comments] }
               : page,
           ),
         }

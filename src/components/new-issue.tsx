@@ -2,13 +2,21 @@ import { useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router'
 import { useTranslation } from 'react-i18next'
 import { Button } from '@/components/ui/button'
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select'
 import { defaultStatuses, IssueReadError } from '@/lib/issues'
 import type { IssueStatus } from '@/lib/issues'
 import { useIssueWrite } from '@/lib/use-issue-write'
 import { MarkdownEditor } from '@/components/markdown-editor'
 import { useUnsavedChanges } from '@/lib/use-unsaved-changes'
+import { useLocalDraft } from '@/lib/use-local-draft'
 
-/** Compose Markdown in either mode, retain failed drafts and open the confirmed GitHub issue. */
+/** Recover local fields with dialog-contained controls and explicit discard or creation. */
 export function NewIssue({
   userId,
   repositoryId,
@@ -22,32 +30,58 @@ export function NewIssue({
 }) {
   const { t } = useTranslation()
   const navigate = useNavigate()
-  const dialog = useRef<HTMLDialogElement>(null)
-  const [title, setTitle] = useState('')
-  const [body, setBody] = useState('')
-  const [status, setStatus] = useState<IssueStatus>('backlog')
+  const [dialog, setDialog] = useState<HTMLDialogElement | null>(null)
+  const mounted = useRef(true)
+  const draft = useLocalDraft(userId, repositoryId)
+  const { title, body, status } = draft.value
+  const hasDraft = !!title || !!body || status !== 'backlog'
   const write = useIssueWrite(userId, repositoryId)
   const unsavedRef = useUnsavedChanges(
-    !!title || !!body || status !== 'backlog',
+    draft.pending ||
+      (!!draft.error && (!!title || !!body || status !== 'backlog')),
   )
   const denied =
     write.error instanceof IssueReadError && write.error.status === 403
   useEffect(() => {
-    if (write.error instanceof IssueReadError && write.error.status === 401)
+    mounted.current = true
+    return () => {
+      mounted.current = false
+    }
+  }, [])
+  useEffect(() => {
+    if (
+      write.error instanceof IssueReadError &&
+      write.error.status === 401 &&
+      !(draft.error && (title || body))
+    )
       onSessionExpired()
-  }, [write.error, onSessionExpired])
+  }, [write.error, onSessionExpired, draft.error, title, body])
+
+  /** Clear this local draft before closing, retaining the dialog if persistence fails. */
+  async function cancel() {
+    if (!draft.ready || draft.clearing || write.isPending) return
+    if (!(await draft.clear()) || !mounted.current) return
+    unsavedRef.current = false
+    dialog?.close()
+  }
 
   /** Preserve the draft until a confirmed result, without automatically retrying an uncertain write. */
   async function create() {
-    if (!title.trim() || write.isPending || denied) return
+    if (
+      !draft.ready ||
+      draft.clearing ||
+      !title.trim() ||
+      write.isPending ||
+      denied
+    )
+      return
     try {
       const issue = await write.submit({ title, body, status })
       if (!issue) return
+      if (!(await draft.clear(draft.value))) return
+      if (!mounted.current) return
       unsavedRef.current = false
-      dialog.current?.close()
-      setTitle('')
-      setBody('')
-      setStatus('backlog')
+      dialog?.close()
       const [owner, name] = issue.full_name.split('/')
       navigate(
         `/workspace/${encodeURIComponent(owner)}/${encodeURIComponent(name)}/issue/${issue.number}`,
@@ -66,17 +100,18 @@ export function NewIssue({
       <Button
         className="h-8 text-xs"
         disabled={denied}
-        onClick={() => dialog.current?.showModal()}
+        onClick={() => dialog?.showModal()}
       >
         + {t('New issue')}
       </Button>
 
       {/* Modal draft uses native focus trapping and Escape handling */}
       <dialog
-        ref={dialog}
+        ref={setDialog}
         aria-labelledby="new-issue-heading"
         onCancel={(event) => {
-          if (write.isPending) event.preventDefault()
+          event.preventDefault()
+          void cancel()
         }}
         className="fixed inset-0 m-auto max-h-[90svh] w-[calc(100%_-_2rem)] max-w-2xl overflow-y-auto rounded-xl border bg-card p-0 text-card-foreground shadow-2xl backdrop:bg-black/60"
       >
@@ -98,8 +133,12 @@ export function NewIssue({
               autoFocus
               required
               value={title}
-              disabled={write.isPending || denied}
-              onChange={(event) => setTitle(event.target.value)}
+              disabled={
+                !draft.ready || draft.clearing || write.isPending || denied
+              }
+              onChange={(event) =>
+                draft.change({ ...draft.value, title: event.target.value })
+              }
               className="mt-2 block w-full rounded-md border bg-background px-3 py-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
             />
           </label>
@@ -108,33 +147,67 @@ export function NewIssue({
             <p className="text-xs font-medium">
               {t('Description (optional Markdown)')}
             </p>
-            <MarkdownEditor
-              value={body}
-              onChange={setBody}
-              label={t('Description')}
-              fullName={fullName}
-              disabled={write.isPending || denied}
-            />
+            {draft.ready && (
+              <MarkdownEditor
+                value={body}
+                onChange={(body) => draft.change({ ...draft.value, body })}
+                label={t('Description')}
+                fullName={fullName}
+                disabled={draft.clearing || write.isPending || denied}
+              />
+            )}
           </div>
-          <label className="block text-xs font-medium">
-            {t('Status')}
-            <select
+
+          {/* Status options share workspace styling and remain inside the modal. */}
+          <div className="space-y-2">
+            <p className="text-xs font-medium">{t('Status')}</p>
+            <Select
               value={status}
-              disabled={write.isPending || denied}
-              onChange={(event) => setStatus(event.target.value as IssueStatus)}
-              className="mt-2 block w-full rounded-md border bg-background px-3 py-2 text-sm"
+              disabled={
+                !draft.ready || draft.clearing || write.isPending || denied
+              }
+              onValueChange={(value) =>
+                draft.change({ ...draft.value, status: value as IssueStatus })
+              }
             >
-              {defaultStatuses
-                .filter((item) => item.state === 'open')
-                .map((item) => (
-                  <option key={item.id} value={item.id}>
-                    {t(item.title)}
-                  </option>
-                ))}
-            </select>
-          </label>
+              <SelectTrigger aria-label={t('Status')} className="w-full">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent container={dialog}>
+                {defaultStatuses
+                  .filter((item) => item.state === 'open')
+                  .map((item) => (
+                    <SelectItem key={item.id} value={item.id}>
+                      {t(item.title)}
+                    </SelectItem>
+                  ))}
+              </SelectContent>
+            </Select>
+          </div>
 
           {/* Write feedback and draft actions */}
+          {!draft.ready && (
+            <p role="status" className="text-xs text-muted-foreground">
+              {t('Recovering local draft…')}
+            </p>
+          )}
+          {draft.error && (
+            <p role="alert" className="text-xs text-destructive">
+              {t(draft.error)}
+            </p>
+          )}
+          {write.isSuccess && write.data && (
+            <p role="status" className="text-xs text-muted-foreground">
+              <a
+                href={write.data.html_url}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="underline"
+              >
+                {t('Issue created on GitHub.')}
+              </a>
+            </p>
+          )}
           {write.error && (
             <p role="alert" className="text-xs text-destructive">
               {t(write.error.message)}
@@ -144,14 +217,20 @@ export function NewIssue({
             <Button
               type="button"
               variant="outline"
-              disabled={write.isPending}
-              onClick={() => dialog.current?.close()}
+              disabled={!draft.ready || draft.clearing || write.isPending}
+              onClick={() => void cancel()}
             >
-              {t('Cancel')}
+              {t(hasDraft || draft.error ? 'Discard draft' : 'Cancel')}
             </Button>
             <Button
               type="submit"
-              disabled={!title.trim() || write.isPending || denied}
+              disabled={
+                !draft.ready ||
+                draft.clearing ||
+                !title.trim() ||
+                write.isPending ||
+                denied
+              }
             >
               {t(write.isPending ? 'Creating…' : 'Create issue')}
             </Button>

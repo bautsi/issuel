@@ -21,12 +21,16 @@ import { IssueMarkdown } from '@/components/issue-markdown'
 import { MarkdownEditor } from '@/components/markdown-editor'
 import { defaultStatuses, getIssueStatus, IssueReadError } from '@/lib/issues'
 import { useIssueDetail } from '@/lib/use-issue-detail'
+import type { CommentsPage } from '@/lib/use-issue-detail'
 import { useIssueComment, useIssueWrite } from '@/lib/use-issue-write'
 import { useUnsavedChanges } from '@/lib/use-unsaved-changes'
 import { useIssueDescription } from '@/lib/use-issue-description'
+import { useLocalDraft } from '@/lib/use-local-draft'
+import { useCommentChange } from '@/lib/use-comment-change'
+import { sameMarkdownContent } from '@/lib/markdown-safety'
 import type { IssueStatus } from '@/lib/issues'
 
-/** Read GitHub content with explicit protected description saves and confirmed metadata/comment writes. */
+/** Keep the recovered composer above newest-first GitHub comments and explicit protected writes. */
 export function IssueDetail({
   userId,
   repository,
@@ -55,7 +59,17 @@ export function IssueDetail({
   const [savingMetadata, setSavingMetadata] = useState(false)
   const metadataSubmitting = useRef(false)
   const [search, setSearch] = useState('')
-  const [draftComment, setDraftComment] = useState('')
+  const commentDraft = useLocalDraft(userId, repository.id, number)
+  const draftComment = commentDraft.value.body
+  const [editingComment, setEditingComment] = useState<{
+    id: number
+    baseline: string
+    body: string
+    safe: boolean
+    original: CommentsPage['comments'][number]
+  } | null>(null)
+  const [deletingComment, setDeletingComment] = useState<number | null>(null)
+  const deleteCommentDialog = useRef<HTMLDialogElement>(null)
   const discardDescriptionDialogRef = useRef<HTMLDialogElement>(null)
   const [confirmForceSave, setConfirmForceSave] = useState(false)
   const { detail, comments, options } = useIssueDetail(
@@ -66,6 +80,7 @@ export function IssueDetail({
   )
   const write = useIssueWrite(userId, repository.id, number)
   const commentWrite = useIssueComment(userId, repository.id, number)
+  const commentChange = useCommentChange(userId, repository.id, number)
   const [editingTitle, setEditingTitle] = useState(false)
   const [draftTitle, setDraftTitle] = useState('')
   const [targetStatus, setTargetStatus] = useState<IssueStatus | ''>('')
@@ -88,7 +103,12 @@ export function IssueDetail({
     useState<typeof requestFailure>(null)
   const visibleRequestFailure =
     requestFailure !== dismissedRequestFailure ? requestFailure : null
-  useUnsavedChanges(!!draftComment || description.dirty)
+  useUnsavedChanges(
+    description.dirty ||
+      commentDraft.pending ||
+      (!!commentDraft.error && !!draftComment) ||
+      (!!editingComment && editingComment.body !== editingComment.baseline),
+  )
   const workspacePath = `/workspace/${encodeURIComponent(repository.owner)}/${encodeURIComponent(repository.name)}`
   useLayoutEffect(() => {
     window.scrollTo(0, 0)
@@ -96,12 +116,15 @@ export function IssueDetail({
   useEffect(() => {
     if (
       !description.dirty &&
+      !draftComment &&
+      !editingComment &&
       [
         detail.error,
         comments.error,
         options.error,
         write.error,
         commentWrite.error,
+        commentChange.error,
       ].some((error) => error instanceof IssueReadError && error.status === 401)
     )
       onSessionExpired()
@@ -111,6 +134,9 @@ export function IssueDetail({
     options.error,
     write.error,
     commentWrite.error,
+    commentChange.error,
+    draftComment,
+    editingComment,
     description.dirty,
     onSessionExpired,
   ])
@@ -174,7 +200,15 @@ export function IssueDetail({
         .flatMap((page) => page.comments)
         .map((comment) => [comment.id, comment]),
     ).values(),
-  ].sort((a, b) => a.id - b.id)
+  ].sort((a, b) => b.id - a.id)
+  // Keep a failed edit visible even when a manual refresh discovers remote deletion.
+  if (
+    editingComment &&
+    !activity.some((comment) => comment.id === editingComment.id)
+  ) {
+    activity.push(editingComment.original)
+    activity.sort((a, b) => b.id - a.id)
+  }
 
   /** Start from the accepted title without changing the remote issue until submission. */
   function editTitle() {
@@ -335,6 +369,8 @@ export function IssueDetail({
   async function saveComment() {
     if (
       !canWrite ||
+      !commentDraft.ready ||
+      commentDraft.clearing ||
       commentWrite.isPending ||
       write.isPending ||
       metadataSubmitting.current ||
@@ -343,10 +379,46 @@ export function IssueDetail({
       return
     try {
       if (await commentWrite.submit(draftComment)) {
-        setDraftComment('')
+        await commentDraft.clear(commentDraft.value)
       }
     } catch {
       /* Keep the exact draft so the user can check GitHub before deciding to resubmit. */
+    }
+  }
+
+  /** Preserve edits and the original raw baseline until an explicit, confirmed save. */
+  async function saveCommentEdit() {
+    if (
+      !editingComment ||
+      !editingComment.safe ||
+      !editingComment.body.trim() ||
+      editingComment.body === editingComment.baseline ||
+      !canWrite ||
+      commentChange.isPending
+    )
+      return
+    try {
+      const result = await commentChange.submit(editingComment)
+      if (result) setEditingComment(null)
+    } catch {
+      /* Keep the exact local Markdown and baseline on conflicts or uncertain results. */
+    }
+  }
+
+  /** Delete only after the user confirms; leave the dialog and comment intact on failure. */
+  async function confirmCommentDelete() {
+    if (deletingComment === null || !canWrite || commentChange.isPending) return
+    try {
+      const result = await commentChange.submit({
+        id: deletingComment,
+        remove: true,
+      })
+      if (result) {
+        deleteCommentDialog.current?.close()
+        setDeletingComment(null)
+      }
+    } catch {
+      /* The server verifies ambiguous deletions without automatically replaying DELETE. */
     }
   }
 
@@ -665,7 +737,22 @@ export function IssueDetail({
                   )}
 
                   {/* Save writes explicitly; Cancel confirms dirty drafts in a modal. */}
-                  <div className="flex flex-wrap gap-2">
+                  <div className="flex flex-wrap justify-end gap-2">
+                    <Button
+                      type="button"
+                      variant="outline"
+                      className="h-7 text-xs"
+                      disabled={description.draft.saving}
+                      onClick={() => {
+                        if (description.dirty) {
+                          setConfirmForceSave(false)
+                          discardDescriptionDialogRef.current?.showModal()
+                        } else void description.close()
+                      }}
+                    >
+                      {t(description.canceling ? 'Loading…' : 'Cancel')}
+                    </Button>
+
                     <Button
                       type="button"
                       className="h-7 text-xs"
@@ -705,21 +792,6 @@ export function IssueDetail({
                         {t('Force Save')}
                       </Button>
                     )}
-
-                    <Button
-                      type="button"
-                      variant="outline"
-                      className="h-7 text-xs"
-                      disabled={description.draft.saving}
-                      onClick={() => {
-                        if (description.dirty) {
-                          setConfirmForceSave(false)
-                          discardDescriptionDialogRef.current?.showModal()
-                        } else void description.close()
-                      }}
-                    >
-                      {t(description.canceling ? 'Loading…' : 'Cancel')}
-                    </Button>
                   </div>
 
                   {/* One modal confirms either overwrite or discard; Escape preserves the draft. */}
@@ -804,6 +876,107 @@ export function IssueDetail({
                   count: issue.comments,
                 })}
               </p>
+
+              {/* Markdown composer submits once and retains failed drafts */}
+              {canWrite && (
+                <form
+                  className="mt-7 space-y-3"
+                  aria-busy={commentWrite.isPending}
+                  onSubmit={(event) => {
+                    event.preventDefault()
+                    void saveComment()
+                  }}
+                >
+                  <p className="text-xs font-medium">{t('Add a comment')}</p>
+
+                  {/* Both modes preserve the same Markdown draft until explicit submission. */}
+                  {commentDraft.ready && (
+                    <MarkdownEditor
+                      value={draftComment}
+                      onChange={(body) =>
+                        commentDraft.change({ ...commentDraft.value, body })
+                      }
+                      label={t('Add a comment')}
+                      fullName={issue.full_name}
+                      defaultBranch={issue.default_branch}
+                      githubUrl={issue.html_url}
+                      disabled={commentDraft.clearing || commentWrite.isPending}
+                    />
+                  )}
+                  {!commentDraft.ready && (
+                    <p role="status" className="text-xs text-muted-foreground">
+                      {t('Recovering local draft…')}
+                    </p>
+                  )}
+                  {commentDraft.error && (
+                    <p role="alert" className="text-xs text-destructive">
+                      {t(commentDraft.error)}
+                    </p>
+                  )}
+
+                  {/* Submission uses the same Markdown from either tab */}
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <span className="text-xs text-muted-foreground">
+                      {t('Markdown and GFM supported.')}
+                    </span>
+
+                    {/* Keep composer actions together at the trailing edge. */}
+                    <div className="ml-auto flex flex-wrap justify-end gap-2">
+                      {!!draftComment && (
+                        <Button
+                          type="button"
+                          variant="outline"
+                          className="h-8 text-xs"
+                          disabled={
+                            !commentDraft.ready ||
+                            commentDraft.clearing ||
+                            commentWrite.isPending
+                          }
+                          onClick={() => void commentDraft.clear()}
+                        >
+                          {t('Discard draft')}
+                        </Button>
+                      )}
+                      <Button
+                        type="submit"
+                        className="h-8 text-xs"
+                        disabled={
+                          commentWrite.isPending ||
+                          !commentDraft.ready ||
+                          commentDraft.clearing ||
+                          write.isPending ||
+                          savingMetadata ||
+                          editingTitle ||
+                          !draftComment.trim() ||
+                          !comments.data?.pages.length
+                        }
+                      >
+                        {t(
+                          commentWrite.isPending
+                            ? 'Submitting…'
+                            : 'Submit comment',
+                        )}
+                      </Button>
+                    </div>
+                  </div>
+                  {!comments.data?.pages.length && (
+                    <p className="text-xs text-muted-foreground">
+                      {t('Load comments before submitting.')}
+                    </p>
+                  )}
+                  {commentWrite.error && (
+                    <p role="alert" className="text-xs text-destructive">
+                      {t(commentWrite.error.message)}
+                    </p>
+                  )}
+                  {commentWrite.isSuccess && (
+                    <p role="status" className="text-xs text-muted-foreground">
+                      {t('Comment posted to GitHub.')}
+                    </p>
+                  )}
+                </form>
+              )}
+
               {comments.isPending && (
                 <p role="status" className="mt-6 text-sm text-muted-foreground">
                   {t('Loading comments…')}
@@ -858,11 +1031,13 @@ export function IssueDetail({
                 {activity.map((comment) => (
                   <li
                     key={comment.id}
-                    className="min-w-0 rounded-lg border bg-card/60 p-4 sm:p-5"
+                    className="relative min-w-0 rounded-lg border bg-card/60 p-4 sm:p-5"
                     id={`issuecomment-${comment.id}`}
                   >
                     {/* Comment author and timestamps */}
-                    <div className="mb-3 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+                    <div
+                      className={`mb-3 flex min-h-7 flex-wrap items-center gap-2 text-xs text-muted-foreground ${canWrite && String(comment.author?.id) === userId && editingComment?.id !== comment.id ? 'pr-20' : ''}`}
+                    >
                       {comment.author ? (
                         <a
                           href={`https://github.com/${encodeURIComponent(comment.author.login)}`}
@@ -902,8 +1077,157 @@ export function IssueDetail({
                       )}
                     </div>
 
-                    {/* Comment Markdown body */}
-                    {comment.body?.trim() ? (
+                    {/* Only the session author's comments expose explicit write actions. */}
+                    {canWrite &&
+                      String(comment.author?.id) === userId &&
+                      editingComment?.id !== comment.id && (
+                        <div className="absolute top-4 right-4 flex gap-1 sm:top-5 sm:right-5">
+                          <Button
+                            type="button"
+                            variant="outline"
+                            className="size-7 border-0 bg-transparent p-1 text-muted-foreground shadow-none hover:text-foreground"
+                            aria-label={t('Edit comment')}
+                            title={t('Edit comment')}
+                            disabled={
+                              !!editingComment || commentChange.isPending
+                            }
+                            onClick={() => {
+                              commentChange.reset()
+                              setEditingComment({
+                                id: comment.id,
+                                baseline: comment.body ?? '',
+                                body: comment.body ?? '',
+                                safe: true,
+                                original: comment,
+                              })
+                            }}
+                          >
+                            <svg
+                              aria-hidden="true"
+                              className="size-4"
+                              viewBox="0 0 24 24"
+                              fill="none"
+                              stroke="currentColor"
+                              strokeWidth="2"
+                              strokeLinecap="round"
+                              strokeLinejoin="round"
+                            >
+                              <path d="m16 3 5 5M4 15 16 3a3.5 3.5 0 0 1 5 5L9 20l-6 1 1-6Z" />
+                            </svg>
+                          </Button>
+                          <Button
+                            type="button"
+                            variant="outline"
+                            className="size-7 border-0 bg-transparent p-1 text-muted-foreground shadow-none hover:text-destructive"
+                            aria-label={t('Delete comment')}
+                            title={t('Delete comment')}
+                            disabled={
+                              !!editingComment || commentChange.isPending
+                            }
+                            onClick={() => {
+                              commentChange.reset()
+                              setDeletingComment(comment.id)
+                              deleteCommentDialog.current?.showModal()
+                            }}
+                          >
+                            <svg
+                              aria-hidden="true"
+                              className="size-4"
+                              viewBox="0 0 24 24"
+                              fill="none"
+                              stroke="currentColor"
+                              strokeWidth="2"
+                              strokeLinecap="round"
+                              strokeLinejoin="round"
+                            >
+                              <path d="M3 6h18M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2M5 6l1 14a1 1 0 0 0 1 1h10a1 1 0 0 0 1-1l1-14M10 10v7M14 10v7" />
+                            </svg>
+                          </Button>
+                        </div>
+                      )}
+
+                    {/* Comment editing retains raw Markdown and never writes on mode changes. */}
+                    {editingComment?.id === comment.id ? (
+                      <form
+                        className="space-y-3"
+                        aria-busy={commentChange.isPending}
+                        onSubmit={(event) => {
+                          event.preventDefault()
+                          void saveCommentEdit()
+                        }}
+                      >
+                        <MarkdownEditor
+                          value={editingComment.body}
+                          label={t('Edit comment')}
+                          fullName={issue.full_name}
+                          defaultBranch={issue.default_branch}
+                          githubUrl={comment.html_url}
+                          disabled={commentChange.isPending}
+                          onChange={(body, mode) =>
+                            setEditingComment((current) =>
+                              current
+                                ? {
+                                    ...current,
+                                    body:
+                                      mode === 'rich' &&
+                                      sameMarkdownContent(
+                                        current.baseline,
+                                        body,
+                                      )
+                                        ? current.baseline
+                                        : body,
+                                  }
+                                : current,
+                            )
+                          }
+                          onSafetyChange={(safe) =>
+                            setEditingComment((current) =>
+                              current ? { ...current, safe } : current,
+                            )
+                          }
+                        />
+
+                        {/* Explicit save/cancel and retained failure feedback */}
+                        <div className="flex justify-end gap-2">
+                          <Button
+                            type="button"
+                            variant="outline"
+                            disabled={commentChange.isPending}
+                            onClick={() => {
+                              setEditingComment(null)
+                              commentChange.reset()
+                              void comments.refetch()
+                            }}
+                          >
+                            {t('Cancel')}
+                          </Button>
+                          <Button
+                            type="submit"
+                            disabled={
+                              commentChange.isPending ||
+                              !canWrite ||
+                              !editingComment.safe ||
+                              !editingComment.body.trim() ||
+                              editingComment.body === editingComment.baseline
+                            }
+                          >
+                            {t(commentChange.isPending ? 'Saving…' : 'Save')}
+                          </Button>
+                        </div>
+                        {!editingComment.safe && (
+                          <p role="alert" className="text-xs text-destructive">
+                            {t(
+                              'Unsafe conversion blocked Save. Edit the preserved Markdown source before saving.',
+                            )}
+                          </p>
+                        )}
+                        {commentChange.error && (
+                          <p role="alert" className="text-xs text-destructive">
+                            {t(commentChange.error.message)}
+                          </p>
+                        )}
+                      </form>
+                    ) : comment.body?.trim() ? (
                       <IssueMarkdown
                         body={comment.body}
                         fullName={issue.full_name}
@@ -943,71 +1267,6 @@ export function IssueDetail({
                     { count: activity.length },
                   )}
                 </p>
-              )}
-
-              {/* Markdown composer submits once and retains failed drafts */}
-              {canWrite && (
-                <form
-                  className="mt-7 space-y-3"
-                  aria-busy={commentWrite.isPending}
-                  onSubmit={(event) => {
-                    event.preventDefault()
-                    void saveComment()
-                  }}
-                >
-                  <p className="text-xs font-medium">{t('Add a comment')}</p>
-
-                  {/* Both modes preserve the same Markdown draft until explicit submission. */}
-                  <MarkdownEditor
-                    value={draftComment}
-                    onChange={setDraftComment}
-                    label={t('Add a comment')}
-                    fullName={issue.full_name}
-                    defaultBranch={issue.default_branch}
-                    githubUrl={issue.html_url}
-                    disabled={commentWrite.isPending}
-                  />
-
-                  {/* Submission uses the same Markdown from either tab */}
-                  <div className="flex flex-wrap items-center justify-between gap-3">
-                    <span className="text-xs text-muted-foreground">
-                      {t('Markdown and GFM supported.')}
-                    </span>
-                    <Button
-                      type="submit"
-                      className="h-8 text-xs"
-                      disabled={
-                        commentWrite.isPending ||
-                        write.isPending ||
-                        savingMetadata ||
-                        editingTitle ||
-                        !draftComment.trim() ||
-                        !comments.data?.pages.length
-                      }
-                    >
-                      {t(
-                        commentWrite.isPending
-                          ? 'Submitting…'
-                          : 'Submit comment',
-                      )}
-                    </Button>
-                  </div>
-                  {!comments.data?.pages.length && (
-                    <p className="text-xs text-muted-foreground">
-                      {t('Load comments before submitting.')}
-                    </p>
-                  )}
-                  {commentWrite.error && (
-                    <p role="alert" className="text-xs text-destructive">
-                      {t(commentWrite.error.message)}
-                    </p>
-                  )}
-                  {commentWrite.isSuccess && (
-                    <p role="status" className="text-xs text-muted-foreground">
-                      {t('Comment posted to GitHub.')}
-                    </p>
-                  )}
-                </form>
               )}
             </section>
           </article>
@@ -1578,6 +1837,71 @@ export function IssueDetail({
           </aside>
         </div>
       )}
+
+      {/* Confirm a permanent GitHub deletion before issuing any DELETE request. */}
+      <dialog
+        ref={deleteCommentDialog}
+        role="alertdialog"
+        aria-labelledby="delete-comment-title"
+        aria-describedby="delete-comment-message"
+        onCancel={(event) => {
+          if (commentChange.isPending) event.preventDefault()
+        }}
+        className="fixed inset-0 m-auto w-[calc(100%_-_2rem)] max-w-md rounded-xl border bg-card p-6 text-card-foreground shadow-2xl backdrop:bg-black/60"
+      >
+        <h2 id="delete-comment-title" className="font-semibold">
+          {t('Delete comment')}
+        </h2>
+        <p
+          id="delete-comment-message"
+          className="mt-3 text-sm text-muted-foreground"
+        >
+          {t(
+            'Permanently delete this comment from GitHub? This cannot be undone.',
+          )}
+        </p>
+        {commentChange.error && deletingComment !== null && (
+          <p role="alert" className="mt-3 text-xs text-destructive">
+            {t(commentChange.error.message)}
+          </p>
+        )}
+
+        {/* Pending prevents duplicate confirmation; failures retain both the comment and dialog. */}
+        <div className="mt-5 flex justify-end gap-2">
+          {commentChange.error && (
+            <Button
+              type="button"
+              variant="outline"
+              disabled={commentChange.isPending || comments.isFetching}
+              onClick={() => {
+                void comments.refetch()
+                void detail.refetch()
+              }}
+            >
+              {t('Refresh comments')}
+            </Button>
+          )}
+          <Button
+            type="button"
+            variant="outline"
+            disabled={commentChange.isPending}
+            onClick={() => {
+              deleteCommentDialog.current?.close()
+              setDeletingComment(null)
+              commentChange.reset()
+            }}
+          >
+            {t('Cancel')}
+          </Button>
+          <Button
+            type="button"
+            disabled={!canWrite || commentChange.isPending}
+            onClick={() => void confirmCommentDelete()}
+          >
+            {t(commentChange.isPending ? 'Deleting…' : 'Delete comment')}
+          </Button>
+        </div>
+      </dialog>
 
       {/* Dismissible connection errors leave editing, Cancel and navigation available. */}
       {visibleRequestFailure && (

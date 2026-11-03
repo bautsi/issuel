@@ -349,3 +349,91 @@ export async function createIssueComment(
     throw new RepositoryError('github_write_uncertain', 502)
   }
 }
+
+/** Verify parent and session author, then explicitly edit or delete one comment without replaying writes. */
+export async function changeIssueComment(
+  access: string,
+  userId: string,
+  repositoryId: number,
+  number: number,
+  commentId: number,
+  input: unknown,
+  remove: boolean,
+) {
+  const fields = input as Record<string, unknown> | null
+  if (
+    !remove &&
+    (!fields ||
+      Array.isArray(fields) ||
+      Object.keys(fields).length !== 2 ||
+      typeof fields.body !== 'string' ||
+      !fields.body.trim() ||
+      typeof fields.baseline !== 'string')
+  )
+    throw new RepositoryError('invalid_comment', 422)
+  const key = `${repositoryId}:comment:${commentId}`
+  const previous = pendingWrites.get(key)
+  let release!: () => void
+  const pending = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  pendingWrites.set(key, pending)
+  await previous
+  try {
+    const issue = await readIssueDetail(access, repositoryId, number)
+    const path = `/repos/${issue.full_name}/issues/comments/${commentId}`
+    const { data } = await githubResponse(path, access)
+    const raw = data as Record<string, unknown>
+    if (
+      raw?.id !== commentId ||
+      raw.issue_url !==
+        `https://api.github.com/repos/${issue.full_name}/issues/${number}`
+    )
+      throw new RepositoryError('comment_not_found', 404)
+    const current = projectIssueComment(data, issue.html_url)
+    if (String(current.author?.id) !== userId)
+      throw new RepositoryError('comment_author_required', 403)
+    if (!remove) {
+      // A prior uncertain save may already have applied this exact body.
+      if ((current.body ?? '') === fields!.body) return { comment: current }
+      if ((current.body ?? '') !== fields!.baseline)
+        throw new RepositoryError('comment_conflict', 409)
+      // GET → compare → PATCH is best effort; GitHub offers no atomic body compare-and-swap.
+      const { data: updated } = await githubResponse(path, access, {
+        method: 'PATCH',
+        body: { body: fields!.body },
+      })
+      const accepted = projectIssueComment(updated, issue.html_url)
+      if (accepted.id !== commentId || accepted.body !== fields!.body)
+        throw new RepositoryError('github_write_uncertain', 502)
+      return { comment: accepted }
+    }
+    try {
+      await githubResponse(path, access, { method: 'DELETE', body: {} })
+    } catch (error) {
+      if (
+        !(error instanceof RepositoryError) ||
+        error.message !== 'github_write_uncertain'
+      )
+        throw error
+      // Verify an ambiguous DELETE once. Never resend it or mistake lost access for deletion.
+      try {
+        await githubResponse(path, access)
+      } catch (verification) {
+        if (
+          verification instanceof RepositoryError &&
+          verification.status === 404
+        ) {
+          await readIssueDetail(access, repositoryId, number)
+          return { deletedId: commentId }
+        }
+        throw error
+      }
+      throw error
+    }
+    return { deletedId: commentId }
+  } finally {
+    release()
+    if (pendingWrites.get(key) === pending) pendingWrites.delete(key)
+  }
+}

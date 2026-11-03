@@ -54,7 +54,7 @@ export async function requestIssueRead(path: string, signal: AbortSignal) {
   return data
 }
 
-/** Isolate detail, paged comments and on-demand repository choices by account and repository. */
+/** Isolate issue reads and fetch newest-first comment pages using GitHub's previous-page cursors. */
 export function useIssueDetail(
   userId: string,
   repositoryId: number | null,
@@ -63,7 +63,7 @@ export function useIssueDetail(
 ) {
   const client = useQueryClient()
   const queryKey = ['github', userId, repositoryId, 'issue', number] as const
-  const commentsKey = [...queryKey, 'comments'] as const
+  const commentsKey = [...queryKey, 'comments', 'newest-first'] as const
   const path = `/api/repositories/${repositoryId}/issues/${number}`
   // Refetch clears query.error before invoking the query function; retain the accepted deadline first.
   const previousDetailError = client.getQueryState(queryKey)?.error
@@ -107,7 +107,7 @@ export function useIssueDetail(
       if (error instanceof IssueReadError && error.retryAt > Date.now())
         throw error
       const data = await requestIssueRead(
-        `${path}/comments?page=${pageParam}&per_page=30`,
+        `${path}/comments?per_page=30${pageParam === null ? '' : `&page=${pageParam}`}`,
         signal,
       )
       if (data?.userId !== userId)
@@ -118,14 +118,12 @@ export function useIssueDetail(
       if (
         data.repositoryId !== repositoryId ||
         data.number !== number ||
-        data.page !== pageParam ||
+        !Number.isSafeInteger(data.page) ||
+        data.page < 1 ||
+        (pageParam !== null && data.page !== pageParam) ||
         data.perPage !== 30 ||
         !Array.isArray(data.comments) ||
-        !(
-          data.nextPage === null ||
-          (Number.isSafeInteger(data.nextPage) &&
-            data.nextPage === pageParam + 1)
-        )
+        data.nextPage !== (data.page === 1 ? null : data.page - 1)
       )
         throw new IssueReadError(
           'The server returned invalid issue content.',
@@ -133,7 +131,7 @@ export function useIssueDetail(
         )
       return data
     },
-    initialPageParam: 1,
+    initialPageParam: null as number | null,
     getNextPageParam: (page) => page.nextPage ?? undefined,
     enabled: repositoryId !== null && detail.isSuccess,
     staleTime: 0,

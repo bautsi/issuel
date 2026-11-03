@@ -1,14 +1,19 @@
-import { useCallback, useEffect, useState } from 'react'
+import { lazy, Suspense, useCallback, useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import * as DropdownMenu from '@radix-ui/react-dropdown-menu'
 import { Button } from '@/components/ui/button'
-import { WorkspaceSelector } from '@/components/workspace-selector'
 import { LanguageSelect } from '@/components/language-select'
+
+const WorkspaceSelector = lazy(() =>
+  import('@/components/workspace-selector').then((module) => ({
+    default: module.WorkspaceSelector,
+  })),
+)
 
 type User = { id: string; login: string; name: string | null }
 
-/** Resolve authentication and offer language switching beside the avatar account menu. */
+/** Recover sessions and load the repository workspace only after authentication succeeds. */
 export default function App() {
   const { t } = useTranslation()
   const [queryClient] = useState(
@@ -36,6 +41,9 @@ export default function App() {
 
   useEffect(() => {
     const controller = new AbortController()
+    const retryDeadline = performance.now() + 70_000
+    let retries = 0
+    let retryTimer: number | undefined
     const url = new URL(window.location.href)
     if (callbackError) {
       url.searchParams.delete('auth_error')
@@ -46,28 +54,62 @@ export default function App() {
       )
     }
 
-    /** Recover identity from the HttpOnly cookie and display only safe error messages. */
+    /** Retry only an active refresh, respecting Retry-After without treating outages as logout. */
     async function restoreSession() {
+      if (controller.signal.aborted) return
+      let retrying = false
       try {
         const response = await fetch('/api/auth/session', {
-          signal: controller.signal,
+          signal: AbortSignal.any([
+            controller.signal,
+            AbortSignal.timeout(15_000),
+          ]),
           cache: 'no-store',
         })
+        if (controller.signal.aborted) return
         if (response.status === 401) {
           setSessionChecked(true)
-          if (callbackError)
-            setError(
-              'GitHub authorization was cancelled, expired, or unsuccessful. Please connect again.',
-            )
+          setError(
+            callbackError
+              ? 'GitHub authorization was cancelled, expired, or unsuccessful. Please connect again.'
+              : null,
+          )
           return
         }
         const data = await response.json()
+        if (controller.signal.aborted) return
         if (!response.ok) {
           if (data.error === 'auth_not_configured') {
             setConfigured(false)
             setError(
               'GitHub authentication is not configured. Ask the server administrator to check the runtime settings in README.',
             )
+            return
+          }
+          if (response.status === 503 && data.error === 'refresh_in_progress') {
+            const retryAfter = response.headers.get('Retry-After')
+            const requestedDelay =
+              retryAfter === null
+                ? 5000
+                : /^\d+$/.test(retryAfter)
+                  ? Number(retryAfter) * 1000
+                  : Date.parse(retryAfter) - Date.now()
+            const delay =
+              Number.isFinite(requestedDelay) && requestedDelay >= 0
+                ? Math.max(1000, requestedDelay)
+                : 5000
+            if (retries < 14 && performance.now() + delay <= retryDeadline) {
+              retries++
+              retrying = true
+              setError(
+                'Your session is being refreshed. Retrying automatically…',
+              )
+              retryTimer = window.setTimeout(() => void restoreSession(), delay)
+            } else {
+              setError(
+                'Session refresh is taking too long. Try again or connect GitHub again.',
+              )
+            }
             return
           }
           throw new Error('Session unavailable')
@@ -81,20 +123,24 @@ export default function App() {
         }
         setUser(data.user)
         setSessionChecked(true)
-        if (callbackError)
-          setError(
-            'GitHub authorization did not complete. Your previous session is still connected.',
-          )
+        setError(
+          callbackError
+            ? 'GitHub authorization did not complete. Your previous session is still connected.'
+            : null,
+        )
       } catch {
         if (!controller.signal.aborted)
           setError('Unable to check your session. Please try again shortly.')
       } finally {
-        if (!controller.signal.aborted) setLoading(false)
+        if (!retrying && !controller.signal.aborted) setLoading(false)
       }
     }
 
     void restoreSession()
-    return () => controller.abort()
+    return () => {
+      controller.abort()
+      window.clearTimeout(retryTimer)
+    }
   }, [callbackError])
 
   /** Clear private cached issues and return to login when a protected read rejects the session. */
@@ -153,6 +199,9 @@ export default function App() {
                 <span className="absolute inset-y-0 left-1/3 w-1/3 rounded-full bg-foreground/60 motion-safe:animate-[issuel-loading_1.6s_ease-in-out_infinite]" />
               </span>
               <span className="sr-only">{t('Checking your session')}</span>
+              {error && (
+                <p className="mt-4 text-sm text-muted-foreground">{t(error)}</p>
+              )}
             </>
           ) : (
             <>
@@ -162,13 +211,21 @@ export default function App() {
               <p className="mt-2 text-sm text-muted-foreground">
                 {t(error ?? 'Your session could not be checked. Please retry.')}
               </p>
-              <Button
-                variant="outline"
-                className="mt-5"
-                onClick={() => window.location.reload()}
-              >
-                {t('Try again')}
-              </Button>
+
+              {/* Recovery remains explicit when session checks cannot complete. */}
+              <div className="mt-5 flex flex-wrap justify-center gap-3">
+                <Button
+                  variant="outline"
+                  onClick={() => window.location.reload()}
+                >
+                  {t('Try again')}
+                </Button>
+                <form method="post" action="/api/auth/login">
+                  <Button type="submit" disabled={!configured}>
+                    {t('Connect GitHub')}
+                  </Button>
+                </form>
+              </div>
             </>
           )}
         </div>
@@ -244,11 +301,19 @@ export default function App() {
         {/* User-scoped repository routing */}
         {!loggingOut && (
           <QueryClientProvider client={queryClient}>
-            <WorkspaceSelector
-              key={user.id}
-              userId={user.id}
-              onSessionExpired={handleSessionExpired}
-            />
+            <Suspense
+              fallback={
+                <p role="status" className="p-6 text-sm text-muted-foreground">
+                  {t('Loading workspace…')}
+                </p>
+              }
+            >
+              <WorkspaceSelector
+                key={user.id}
+                userId={user.id}
+                onSessionExpired={handleSessionExpired}
+              />
+            </Suspense>
           </QueryClientProvider>
         )}
       </div>

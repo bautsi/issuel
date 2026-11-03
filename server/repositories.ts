@@ -33,7 +33,7 @@ export class RepositoryError extends Error {
   }
 }
 
-/** Trace GitHub reads and single-attempt writes, retaining only sanitized failures. */
+/** Trace single-attempt GitHub writes, accept empty DELETE success and retain sanitized failures. */
 export async function githubResponse(
   path: string,
   accessToken: string,
@@ -120,6 +120,8 @@ export async function githubResponse(
   if (write && !response.ok)
     throw new RepositoryError('github_write_uncertain', 503)
   if (!response.ok) throw new RepositoryError('github_unavailable', 503)
+  if (write?.method === 'DELETE' && response.status === 204)
+    return { data: null, link: null }
   if (!body || typeof body !== 'object') {
     throw new RepositoryError('github_invalid_response', 502)
   }

@@ -144,12 +144,12 @@ export function projectIssueDetail(
   }
 }
 
-/** Return one bounded comments page, verifying issue identity and accepting only a sequential next link. */
+/** Start at the latest GitHub comments page and follow validated previous pages toward older comments. */
 export async function readIssueComments(
   accessToken: string,
   repositoryId: number,
   number: number,
-  page: number,
+  page: number | undefined,
   perPage: number,
 ) {
   // Comments endpoints also accept PRs, so each page verifies the parent resource first.
@@ -172,19 +172,67 @@ export async function readIssueComments(
     !issueUrl.pathname.endsWith(`/issues/${number}`)
   )
     throw new RepositoryError('github_invalid_response', 502)
-  const { data, link } = await githubResponse(
-    `/repositories/${repositoryId}/issues/${number}/comments?page=${page}&per_page=${perPage}`,
+  const path = `/repositories/${repositoryId}/issues/${number}/comments`
+  const namedPath = `/repos${issueUrl.pathname}/comments`
+  let currentPage = page ?? 1
+  let result = await githubResponse(
+    `${path}?page=${currentPage}&per_page=${perPage}`,
     accessToken,
   )
+  if (!Array.isArray(result.data) || result.data.length > perPage)
+    throw new RepositoryError('github_invalid_response', 502)
+  if (page === undefined) {
+    // Issue comments only support ascending IDs; discover the tail without downloading all history.
+    const last = result.link
+      ?.split(',')
+      .find((part) => /;\s*rel="last"/.test(part))
+    if (last) {
+      let url: URL
+      try {
+        url = new URL(last.match(/<([^>]+)>/)?.[1] ?? '')
+      } catch {
+        throw new RepositoryError('github_invalid_response', 502)
+      }
+      const candidate = Number(url.searchParams.get('page'))
+      if (
+        url.origin !== 'https://api.github.com' ||
+        url.username ||
+        url.password ||
+        ![path, namedPath].includes(url.pathname) ||
+        url.searchParams.get('per_page') !== String(perPage) ||
+        !Number.isSafeInteger(candidate) ||
+        candidate < 1
+      )
+        throw new RepositoryError('github_invalid_response', 502)
+      if (candidate > 1) {
+        currentPage = candidate
+        result = await githubResponse(
+          `${path}?page=${currentPage}&per_page=${perPage}`,
+          accessToken,
+        )
+      }
+    } else if (
+      result.link?.split(',').some((part) => /;\s*rel="next"/.test(part))
+    ) {
+      throw new RepositoryError('github_invalid_response', 502)
+    }
+  }
+  const { data, link } = result
   if (!Array.isArray(data) || data.length > perPage)
     throw new RepositoryError('github_invalid_response', 502)
-  const comments = data.map((value: unknown) =>
-    projectIssueComment(value, `${issueUrl.origin}${issueUrl.pathname}`),
-  )
+  if (currentPage > 1 && data.length === 0)
+    throw new RepositoryError('github_invalid_response', 502)
+  const comments = data
+    .map((value: unknown) =>
+      projectIssueComment(value, `${issueUrl.origin}${issueUrl.pathname}`),
+    )
+    .reverse()
   let nextPage: number | null = null
-  const next = link?.split(',').find((part) => /;\s*rel="next"/.test(part))
-  if (next) {
-    const target = next.match(/<([^>]+)>/)?.[1]
+  const previous = link?.split(',').find((part) => /;\s*rel="prev"/.test(part))
+  if (currentPage > 1 && !previous)
+    throw new RepositoryError('github_invalid_response', 502)
+  if (previous) {
+    const target = previous.match(/<([^>]+)>/)?.[1]
     let url: URL
     try {
       url = new URL(target ?? '')
@@ -196,13 +244,16 @@ export async function readIssueComments(
       url.origin !== 'https://api.github.com' ||
       url.username ||
       url.password ||
+      ![path, namedPath].includes(url.pathname) ||
+      url.searchParams.get('per_page') !== String(perPage) ||
       !Number.isSafeInteger(candidate) ||
-      candidate !== page + 1
+      candidate < 1 ||
+      candidate !== currentPage - 1
     )
       throw new RepositoryError('github_invalid_response', 502)
     nextPage = candidate
   }
-  return { comments, page, perPage, nextPage }
+  return { comments, page: currentPage, perPage, nextPage }
 }
 
 /** Project both fetched and newly created comments through the same safe reading representation. */

@@ -32,7 +32,7 @@ function logTarget(input: string | URL) {
   return { path: url.pathname, ...pagination }
 }
 
-/** Correlate API requests and their GitHub calls without trusting an incoming request ID. */
+/** Correlate API calls and allowlisted session errors without logging credentials or response bodies. */
 export const requestLogging: MiddlewareHandler = async (c, next) => {
   const context = { requestId: randomUUID(), githubRequests: 0 }
   const target = logTarget(c.req.url)
@@ -55,6 +55,35 @@ export const requestLogging: MiddlewareHandler = async (c, next) => {
       failed = true
       throw error
     } finally {
+      let errorCode: string | undefined
+      if (
+        !failed &&
+        c.req.path === '/api/auth/session' &&
+        c.res.status >= 400
+      ) {
+        try {
+          const data: unknown = await c.res.clone().json()
+          if (
+            data &&
+            typeof data === 'object' &&
+            'error' in data &&
+            typeof data.error === 'string' &&
+            [
+              'auth_not_configured',
+              'authentication_unavailable',
+              'github_unavailable',
+              'github_authorization_failed',
+              'expiring_tokens_required',
+              'refresh_in_progress',
+              'reauthentication_required',
+              'unauthorized',
+            ].includes(data.error)
+          )
+            errorCode = data.error
+        } catch {
+          // Diagnostic logging must not change the response or expose an unexpected body.
+        }
+      }
       console.info(
         JSON.stringify({
           timestamp: new Date().toISOString(),
@@ -63,6 +92,7 @@ export const requestLogging: MiddlewareHandler = async (c, next) => {
           method: c.req.method,
           ...target,
           status: failed ? 500 : c.res.status,
+          ...(errorCode ? { error: errorCode } : {}),
           durationMs: Math.round(performance.now() - startedAt),
           githubAccessed: context.githubRequests > 0,
           githubRequests: context.githubRequests,

@@ -21,7 +21,12 @@ import {
   readIssueDetail,
   readIssueOptions,
 } from './issue-detail.ts'
-import { createIssue, createIssueComment, updateIssue } from './issue-writes.ts'
+import {
+  changeIssueComment,
+  createIssue,
+  createIssueComment,
+  updateIssue,
+} from './issue-writes.ts'
 import { defaultStatuses } from './issue-status.ts'
 import { githubFetch } from './logging.ts'
 
@@ -633,7 +638,7 @@ export function createAuth() {
   })
 
   app.on(
-    ['GET', 'POST', 'PATCH'],
+    ['GET', 'POST', 'PATCH', 'DELETE'],
     [
       '/auth/session',
       '/repositories',
@@ -641,6 +646,7 @@ export function createAuth() {
       '/repositories/:repositoryId/issues',
       '/repositories/:repositoryId/issues/:number',
       '/repositories/:repositoryId/issues/:number/comments',
+      '/repositories/:repositoryId/issues/:number/comments/:commentId',
       '/repositories/:repositoryId/labels',
       '/repositories/:repositoryId/assignees',
     ],
@@ -657,6 +663,10 @@ export function createAuth() {
             )) ||
           (c.req.method === 'PATCH' &&
             /^\/api\/repositories\/[1-9]\d*\/issues\/[1-9]\d*$/.test(
+              c.req.path,
+            )) ||
+          (['PATCH', 'DELETE'].includes(c.req.method) &&
+            /^\/api\/repositories\/[1-9]\d*\/issues\/[1-9]\d*\/comments\/[1-9]\d*$/.test(
               c.req.path,
             ))
         )
@@ -685,6 +695,9 @@ export function createAuth() {
         const repo = c.req.param('repo')
         const repositoryId = c.req.param('repositoryId')
         const issueNumber = c.req.param('number')
+        const commentId = c.req.param('commentId')
+        if (commentId !== undefined && !writing)
+          return c.json({ error: 'Not found' }, 404)
         let result
         let status: 200 | 404 = 200
         if (repositoryId) {
@@ -704,6 +717,9 @@ export function createAuth() {
             (issueNumber !== undefined &&
               (!/^[1-9]\d*$/.test(issueNumber) ||
                 !Number.isSafeInteger(Number(issueNumber)))) ||
+            (commentId !== undefined &&
+              (!/^[1-9]\d*$/.test(commentId) ||
+                !Number.isSafeInteger(Number(commentId)))) ||
             (state !== 'open' && state !== 'closed') ||
             !/^[1-9]\d*$/.test(page) ||
             !Number.isSafeInteger(Number(page)) ||
@@ -741,27 +757,40 @@ export function createAuth() {
               return c.json({ error: 'invalid_issue_write' }, 400)
             const input: unknown = await c.req.json().catch(() => null)
             result = {
-              ...(c.req.path.endsWith('/comments')
+              ...(commentId !== undefined
                 ? {
-                    comment: await createIssueComment(
+                    ...(await changeIssueComment(
                       token,
+                      session.github_user_id,
                       repository.id,
                       Number(issueNumber),
+                      Number(commentId),
                       input,
-                    ),
+                      c.req.method === 'DELETE',
+                    )),
                     number: Number(issueNumber),
                   }
-                : {
-                    issue:
-                      issueNumber === undefined
-                        ? await createIssue(token, repository.id, input)
-                        : await updateIssue(
-                            token,
-                            repository.id,
-                            Number(issueNumber),
-                            input,
-                          ),
-                  }),
+                : c.req.path.endsWith('/comments')
+                  ? {
+                      comment: await createIssueComment(
+                        token,
+                        repository.id,
+                        Number(issueNumber),
+                        input,
+                      ),
+                      number: Number(issueNumber),
+                    }
+                  : {
+                      issue:
+                        issueNumber === undefined
+                          ? await createIssue(token, repository.id, input)
+                          : await updateIssue(
+                              token,
+                              repository.id,
+                              Number(issueNumber),
+                              input,
+                            ),
+                    }),
               userId: session.github_user_id,
               repositoryId: repository.id,
             }
@@ -785,7 +814,7 @@ export function createAuth() {
                   token,
                   repository.id,
                   Number(issueNumber),
-                  Number(page),
+                  c.req.query('page') === undefined ? undefined : Number(page),
                   Number(perPage),
                 )),
                 userId: session.github_user_id,
