@@ -5,7 +5,7 @@ import type { ClosedIssueStatus } from './issue-status.ts'
 type IssueLabel = { id: number | null; name: string; color: string | null }
 type IssueUser = { id: number; login: string }
 
-/** Search Closed reasons independently, rejecting incomplete data and flagging stale index membership. */
+/** Sort each Closed reason independently while retaining the complete Open loading strategy. */
 export async function readIssues(
   accessToken: string,
   repository: { id: number; full_name: string },
@@ -13,13 +13,15 @@ export async function readIssues(
   page: number,
   perPage: number,
   category?: ClosedIssueStatus,
+  sort: 'updated' | 'created-desc' | 'created-asc' = 'updated',
 ) {
   const definition = defaultStatuses.find(
     (status) => status.id === category && status.state === 'closed',
   )
   if (
     (state === 'closed') !== !!category ||
-    (category && definition?.state !== 'closed')
+    (category && definition?.state !== 'closed') ||
+    (state === 'open' && sort !== 'updated')
   )
     throw new RepositoryError('github_invalid_response', 502)
   const reason = definition?.state === 'closed' ? definition.reason : null
@@ -35,13 +37,13 @@ export async function readIssues(
     state,
     page: String(page),
     per_page: String(perPage),
-    sort: 'updated',
+    sort: sort === 'updated' ? 'updated' : 'created',
     direction: 'desc',
   })
   if (reason) {
     parameters.delete('state')
     parameters.delete('direction')
-    parameters.set('order', 'desc')
+    parameters.set('order', sort === 'created-asc' ? 'asc' : 'desc')
     parameters.set(
       'q',
       `repo:${repository.full_name} is:issue state:closed reason:${reason === 'not_planned' ? '"not planned"' : reason}`,

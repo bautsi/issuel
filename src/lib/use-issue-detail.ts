@@ -17,7 +17,7 @@ export type CommentsPage = Awaited<ReturnType<typeof readIssueComments>> & {
   number: number
 }
 
-/** Translate protected read failures without retaining provider bodies or credentials. */
+/** Distinguish invalid local parameters from provider rejection without exposing provider bodies. */
 export async function requestIssueRead(path: string, signal: AbortSignal) {
   let response: Response
   try {
@@ -37,11 +37,21 @@ export async function requestIssueRead(path: string, signal: AbortSignal) {
         data?.error === 'issue_not_found'
           ? 'Issue not found or no longer accessible. Pull requests are not supported here.'
           : 'This repository no longer exists or is not accessible to your account and App.',
+      422:
+        data?.error === 'invalid_search_parameters'
+          ? 'Search parameters are invalid. Check the submitted text and filters.'
+          : data?.error === 'github_search_rejected'
+            ? 'GitHub rejected this search.'
+            : 'GitHub rejected this request.',
       429: 'GitHub rate limit reached. Please wait before retrying.',
     }
     const delay = Number(response.headers.get('Retry-After'))
     throw new IssueReadError(
-      messages[response.status] ??
+      (data?.error === 'github_search_stale'
+        ? 'GitHub search is catching up with issue changes. This page was not accepted; refresh later.'
+        : data?.error === 'github_search_mismatch'
+          ? 'GitHub returned results outside this repository or included pull requests. This page was not accepted.'
+          : messages[response.status]) ??
         'Issue content could not be loaded. Please retry shortly.',
       response.status,
       Number.isSafeInteger(delay) && delay > 0

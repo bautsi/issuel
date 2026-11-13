@@ -24,7 +24,7 @@ type Repository = {
   installations: { id: number; permissions: Record<string, string> }[]
 }
 
-/** Reuse known repository metadata immediately while keeping detail loading stable. */
+/** Reuse repository metadata and retain search parameters when normalizing the current workspace. */
 export function WorkspaceSelector({
   userId,
   onSessionExpired,
@@ -344,7 +344,7 @@ export function WorkspaceSelector({
             (location.pathname !== canonicalPath ||
               historyId !== String(selected.id)))) && (
           <Navigate
-            to={canonicalPath}
+            to={`${canonicalPath}${match ? location.search : ''}`}
             replace
             state={{ userId, repositoryId: selected.id }}
           />

@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
-import { Link } from 'react-router'
+import { Link, useLocation } from 'react-router'
 import { useTranslation } from 'react-i18next'
 import { Button } from '@/components/ui/button'
 import {
@@ -30,7 +30,7 @@ import { useCommentChange } from '@/lib/use-comment-change'
 import { sameMarkdownContent } from '@/lib/markdown-safety'
 import type { IssueStatus } from '@/lib/issues'
 
-/** Keep the recovered composer above newest-first GitHub comments and explicit protected writes. */
+/** Keep protected edits and comments while preserving search navigation back to the issue list. */
 export function IssueDetail({
   userId,
   repository,
@@ -50,6 +50,7 @@ export function IssueDetail({
   onSessionExpired: () => void
 }) {
   const { t, i18n } = useTranslation()
+  const location = useLocation()
   const [selector, setSelector] = useState<'labels' | 'assignees' | null>(null)
   const selectorRef = useRef<HTMLDivElement>(null)
   const [metadataDrafts, setMetadataDrafts] = useState({
@@ -427,7 +428,7 @@ export function IssueDetail({
       {/* Issue navigation stays available during loading and failures */}
       <header className="mb-8 flex flex-wrap items-center justify-between gap-3 border-b pb-4 text-xs text-muted-foreground">
         <Link
-          to={workspacePath}
+          to={`${workspacePath}${location.search}`}
           state={{ userId, repositoryId: repository.id }}
           className="rounded-sm py-1 hover:text-foreground focus-visible:outline-2 focus-visible:outline-ring"
         >

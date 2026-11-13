@@ -24,7 +24,7 @@ export class IssueReadError extends Error {
   }
 }
 
-/** Validate state/reason-specific pages and expose safe Search failures without discarding earlier pages. */
+/** Request the selected Closed ordering and validate pages without discarding earlier accepted results. */
 export async function fetchIssuePage(
   userId: string,
   repositoryId: number,
@@ -33,11 +33,12 @@ export async function fetchIssuePage(
   perPage: number,
   signal: AbortSignal,
   category: ClosedIssueStatus | null,
+  sort: 'updated' | 'created-desc' | 'created-asc' = 'updated',
 ): Promise<IssuePage> {
   let response: Response
   try {
     response = await fetch(
-      `/api/repositories/${repositoryId}/issues?state=${state}&page=${page}&per_page=${perPage}${category ? `&category=${category}` : ''}`,
+      `/api/repositories/${repositoryId}/issues?state=${state}&page=${page}&per_page=${perPage}&sort=${sort}${category ? `&category=${category}` : ''}`,
       {
         signal,
         cache: 'no-store',

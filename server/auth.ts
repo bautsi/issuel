@@ -16,6 +16,7 @@ import {
   resolveWorkspace,
 } from './repositories.ts'
 import { readIssues } from './issues.ts'
+import { readIssueSearch } from './issue-search.ts'
 import {
   readIssueComments,
   readIssueDetail,
@@ -281,7 +282,7 @@ async function githubUser(accessToken: string) {
   }
 }
 
-/** Mount authentication and authorized issue reads/writes with shared session and origin protection. */
+/** Protect scoped search, sorted issue reads and writes with shared session and origin checks. */
 export function createAuth() {
   const app = new Hono()
   let config: Config | null = null
@@ -644,6 +645,7 @@ export function createAuth() {
       '/repositories',
       '/workspaces/:owner/:repo',
       '/repositories/:repositoryId/issues',
+      '/repositories/:repositoryId/search',
       '/repositories/:repositoryId/issues/:number',
       '/repositories/:repositoryId/issues/:number/comments',
       '/repositories/:repositoryId/issues/:number/comments/:commentId',
@@ -794,6 +796,29 @@ export function createAuth() {
               userId: session.github_user_id,
               repositoryId: repository.id,
             }
+          } else if (c.req.path.endsWith('/search')) {
+            if (
+              ['q', 'status', 'label', 'sort', 'page'].some(
+                (parameter) => (c.req.queries(parameter)?.length ?? 0) > 1,
+              ) ||
+              ['state', 'category', 'per_page'].some(
+                (parameter) => c.req.query(parameter) !== undefined,
+              )
+            )
+              return c.json({ error: 'invalid_search_parameters' }, 422)
+            result = {
+              ...(await readIssueSearch(
+                token,
+                repository.id,
+                c.req.query('q') ?? '',
+                c.req.query('status') ?? 'all',
+                c.req.query('label') ?? '',
+                c.req.query('sort') ?? 'updated',
+                Number(page),
+              )),
+              userId: session.github_user_id,
+              repositoryId: repository.id,
+            }
           } else if (
             c.req.path.endsWith('/labels') ||
             c.req.path.endsWith('/assignees')
@@ -833,6 +858,15 @@ export function createAuth() {
               }
             }
           } else {
+            const sort = c.req.query('sort') ?? 'updated'
+            if (
+              (sort !== 'updated' &&
+                sort !== 'created-desc' &&
+                sort !== 'created-asc') ||
+              (state === 'open' && sort !== 'updated') ||
+              (c.req.queries('sort')?.length ?? 0) > 1
+            )
+              return c.json({ error: 'invalid_issue_parameters' }, 400)
             const issues = await readIssues(
               token,
               repository,
@@ -842,6 +876,7 @@ export function createAuth() {
               state === 'closed' && category?.state === 'closed'
                 ? category.id
                 : undefined,
+              sort,
             )
             result = {
               ...issues,

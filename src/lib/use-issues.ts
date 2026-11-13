@@ -11,15 +11,17 @@ import { getIssueStatus } from '@/lib/issues'
 import type { IssueDetail } from '@/lib/use-issue-detail'
 import { requestIssueRead } from '@/lib/use-issue-detail'
 
-/** Keep independent pages while reconciling delayed Search results against accepted detail responses. */
+/** Isolate Closed ordering and pages while sharing the complete Open cache across sort changes. */
 export function useIssues(
   userId: string,
   repositoryId: number,
   state: 'open' | 'closed',
   enabled: boolean,
   category?: ClosedIssueStatus,
+  sort: 'updated' | 'created-desc' | 'created-asc' = 'updated',
 ) {
   const client = useQueryClient()
+  const requestedSort = state === 'open' ? 'updated' : sort
   const perPage = state === 'closed' ? 10 : 100
   const closedCategory = state === 'closed' ? (category ?? 'done') : null
   const definition = defaultStatuses.find(
@@ -36,8 +38,8 @@ export function useIssues(
       category: closedCategory,
       reason,
       perPage,
-      sort: 'updated',
-      direction: 'desc',
+      sort: requestedSort === 'updated' ? 'updated' : 'created',
+      direction: requestedSort === 'created-asc' ? 'asc' : 'desc',
     },
   ] as const
   const refreshKey = [...queryKey, 'refresh'] as const
@@ -71,6 +73,7 @@ export function useIssues(
         perPage,
         signal,
         closedCategory,
+        requestedSort,
       )
       // Recent successful mutations bridge Search indexing delay without seeding fake pages.
       const writes = client
