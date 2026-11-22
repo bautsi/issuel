@@ -1,5 +1,5 @@
 statusLabels:
   backlog: "status:backlog"
-  todo: "invalid"
+  todo: "status:todo"
   inProgress: "status:in-progress"
   inReview: "status:in-review"
