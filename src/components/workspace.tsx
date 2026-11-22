@@ -13,17 +13,18 @@ import {
 } from '@/components/ui/select'
 import { Skeleton } from '@/components/ui/skeleton'
 import { NewIssue } from '@/components/new-issue'
+import { RepositorySettings } from '@/components/repository-settings'
 import {
   Tooltip,
   TooltipContent,
   TooltipProvider,
   TooltipTrigger,
 } from '@/components/ui/tooltip'
+import { getIssueStatus, IssueReadError } from '@/lib/issues'
 import {
-  defaultStatuses as groups,
-  getIssueStatus,
-  IssueReadError,
-} from '@/lib/issues'
+  useRepositoryConfig,
+  useRepositoryStatuses,
+} from '@/lib/use-repository-config'
 import type { Issue, IssueStatus } from '@/lib/issues'
 import { useIssues } from '@/lib/use-issues'
 import { useIssueSearch } from '@/lib/use-issue-search'
@@ -67,9 +68,11 @@ export function StatusIcon({ status }: { status: IssueStatus | 'conflict' }) {
 
 /** Open a repository-scoped detail while preserving the list's search parameters. */
 function IssueRow({ issue }: { issue: Issue }) {
+  const { data: config } = useRepositoryConfig()
+  const groups = useRepositoryStatuses()
   const { t, i18n } = useTranslation()
   const location = useLocation()
-  const mapped = getIssueStatus(issue)
+  const mapped = getIssueStatus(issue, config.mapping)
   const statusName = t(
     mapped.status === 'conflict'
       ? 'Mapping conflict'
@@ -104,7 +107,7 @@ function IssueRow({ issue }: { issue: Issue }) {
         <TooltipContent
           side="bottom"
           align="start"
-          className="pointer-events-none break-words"
+          className="pointer-events-none wrap-break-word"
         >
           {issue.title}
         </TooltipContent>
@@ -121,7 +124,7 @@ function IssueRow({ issue }: { issue: Issue }) {
               {t('Conflict')}
             </span>
           </TooltipTrigger>
-          <TooltipContent side="bottom" className="break-words">
+          <TooltipContent side="bottom" className="wrap-break-word">
             {t('Conflicting status labels: {{labels}}', {
               labels: mapped.conflictingLabels.join(', '),
             })}
@@ -243,6 +246,7 @@ function IssueSearchGroup({
   cachedIssues: Issue[] | null
 }) {
   const { t } = useTranslation()
+  const { data: config } = useRepositoryConfig()
   const query = useIssueSearch(
     userId,
     repositoryId,
@@ -262,7 +266,9 @@ function IssueSearchGroup({
   const cached = !query.data && cachedIssues !== null
   const items = cached
     ? cachedIssues
-        .filter((issue) => getIssueStatus(issue).status === group.id)
+        .filter(
+          (issue) => getIssueStatus(issue, config.mapping).status === group.id,
+        )
         .slice(0, 30)
     : [
         ...new Map(
@@ -412,7 +418,7 @@ function IssueSearchGroup({
   )
 }
 
-/** Retain independent group cursors, explicit filter choices and loaded-row title ordering. */
+/** Keep repository settings beside refresh while retaining explicit search and independent group cursors. */
 export function Workspace({
   userId,
   repository,
@@ -431,6 +437,8 @@ export function Workspace({
   scrollPositions: RefObject<Map<number, number>>
 }) {
   const { t } = useTranslation()
+  const config = useRepositoryConfig()
+  const groups = useRepositoryStatuses()
   const client = useQueryClient()
   const [searchParameters, setSearchParameters] = useSearchParams()
   const searchText = searchParameters.get('q') ?? ''
@@ -642,6 +650,8 @@ export function Workspace({
     searchRefreshing.current = true
     setSearchFailure(null)
     try {
+      const latestConfig = await config.refetch({ throwOnError: true })
+      if (latestConfig.data?.sha !== config.data.sha) return
       if (groupByStatus)
         await client.refetchQueries(
           {
@@ -678,6 +688,7 @@ export function Workspace({
     setRefreshing(true)
     setRefreshError(null)
     try {
+      await config.refetch({ throwOnError: true })
       const results = await Promise.allSettled(
         [
           open,
@@ -712,6 +723,16 @@ export function Workspace({
                 'Issues could not be loaded. Please retry shortly.',
               ),
         )
+    } catch (error) {
+      if (error instanceof IssueReadError && error.status === 401)
+        onSessionExpired()
+      setRefreshError(
+        error instanceof IssueReadError
+          ? error
+          : new IssueReadError(
+              'Unable to load repository config. Check your connection and retry.',
+            ),
+      )
     } finally {
       refreshPending.current = false
       setRefreshing(false)
@@ -745,7 +766,7 @@ export function Workspace({
   ].sort(compareIssues)
   const mapped = issues.map((issue) => ({
     issue,
-    status: getIssueStatus(issue).status,
+    status: getIssueStatus(issue, config.data.mapping).status,
   }))
   const conflicts = mapped.filter((item) => item.status === 'conflict')
   const openConflictCount = conflicts.filter(
@@ -818,7 +839,7 @@ export function Workspace({
         </p>
         <div className="mt-3 flex flex-wrap items-end justify-between gap-3">
           <div className="min-w-0 flex-1">
-            <h1 className="break-words text-2xl font-semibold tracking-tight">
+            <h1 className="wrap-break-word text-2xl font-semibold tracking-tight">
               {repository.full_name}
             </h1>
             <p className="mt-3 text-sm text-muted-foreground">
@@ -888,6 +909,17 @@ export function Workspace({
                 )}
               </svg>
             </Button>
+
+            {/* Repository mapping settings sit beside manual refresh */}
+            <RepositorySettings
+              canWrite={
+                !!repository.permissions.push &&
+                repository.installations.some(
+                  (installation) =>
+                    installation.permissions.contents === 'write',
+                )
+              }
+            />
 
             {/* Issue creation requires both user and App write access */}
             {canWrite && (
@@ -1057,6 +1089,15 @@ export function Workspace({
                 </div>
               )}
               {search.labels.data?.labels
+                .filter(
+                  (label) =>
+                    !groups.some(
+                      (status) =>
+                        status.state === 'open' &&
+                        status.label?.toLowerCase() ===
+                          label.name.toLowerCase(),
+                    ),
+                )
                 .filter((label) =>
                   label.name
                     .toLowerCase()

@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { Link, useLocation } from 'react-router'
-import { useTranslation } from 'react-i18next'
+import { Trans, useTranslation } from 'react-i18next'
+import { RepositorySettingsLink } from '@/components/repository-settings'
 import { Button } from '@/components/ui/button'
 import {
   Select,
@@ -19,7 +20,11 @@ import {
 import { StatusIcon } from '@/components/workspace'
 import { IssueMarkdown } from '@/components/issue-markdown'
 import { MarkdownEditor } from '@/components/markdown-editor'
-import { defaultStatuses, getIssueStatus, IssueReadError } from '@/lib/issues'
+import { getIssueStatus, IssueReadError } from '@/lib/issues'
+import {
+  useRepositoryConfig,
+  useRepositoryStatuses,
+} from '@/lib/use-repository-config'
 import { useIssueDetail } from '@/lib/use-issue-detail'
 import type { CommentsPage } from '@/lib/use-issue-detail'
 import { useIssueComment, useIssueWrite } from '@/lib/use-issue-write'
@@ -50,6 +55,8 @@ export function IssueDetail({
   onSessionExpired: () => void
 }) {
   const { t, i18n } = useTranslation()
+  const { data: config } = useRepositoryConfig()
+  const defaultStatuses = useRepositoryStatuses()
   const location = useLocation()
   const [selector, setSelector] = useState<'labels' | 'assignees' | null>(null)
   const selectorRef = useRef<HTMLDivElement>(null)
@@ -166,7 +173,7 @@ export function IssueDetail({
   }
 
   const issue = detail.data
-  const mapped = issue ? getIssueStatus(issue) : null
+  const mapped = issue ? getIssueStatus(issue, config.mapping) : null
   const metadataChanges = {
     labels: [...metadataDrafts.labels].filter(
       ([name, selected]) =>
@@ -338,7 +345,7 @@ export function IssueDetail({
       for (const [value, selected] of changes) {
         const present =
           kind === 'labels'
-            ? getIssueStatus(accepted).labels.some(
+            ? getIssueStatus(accepted, config.mapping).labels.some(
                 (label) => label.name.toLowerCase() === value.toLowerCase(),
               )
             : accepted.assignees.some(
@@ -587,7 +594,10 @@ export function IssueDetail({
             {/* Feedback is shared by title and status writes */}
             {write.error && (
               <p role="alert" className="mt-3 text-xs text-destructive">
-                {t(write.error.message)}
+                <Trans
+                  i18nKey={write.error.message}
+                  components={{ settingsLink: <RepositorySettingsLink /> }}
+                />
               </p>
             )}
             {(savingMetadata || write.isPending || write.isSuccess) && (
@@ -1585,6 +1595,15 @@ export function IssueDetail({
                         <div className="max-h-56 overflow-y-auto">
                           {kind === 'labels'
                             ? options.data?.labels
+                                .filter(
+                                  (label) =>
+                                    !defaultStatuses.some(
+                                      (status) =>
+                                        status.state === 'open' &&
+                                        status.label?.toLowerCase() ===
+                                          label.name.toLowerCase(),
+                                    ),
+                                )
                                 .filter((label) =>
                                   label.name
                                     .toLowerCase()
@@ -1685,11 +1704,21 @@ export function IssueDetail({
                           {options.isSuccess &&
                             !options.isFetching &&
                             !(kind === 'labels'
-                              ? options.data.labels.some((label) =>
-                                  label.name
-                                    .toLowerCase()
-                                    .includes(search.toLowerCase()),
-                                )
+                              ? options.data.labels
+                                  .filter(
+                                    (label) =>
+                                      !defaultStatuses.some(
+                                        (status) =>
+                                          status.state === 'open' &&
+                                          status.label?.toLowerCase() ===
+                                            label.name.toLowerCase(),
+                                      ),
+                                  )
+                                  .some((label) =>
+                                    label.name
+                                      .toLowerCase()
+                                      .includes(search.toLowerCase()),
+                                  )
                               : assigneeOptions.some((user) =>
                                   user.login
                                     .toLowerCase()
@@ -1749,7 +1778,12 @@ export function IssueDetail({
                         </div>
                         {write.error && (
                           <p role="alert" className="mt-2 text-destructive">
-                            {t(write.error.message)}
+                            <Trans
+                              i18nKey={write.error.message}
+                              components={{
+                                settingsLink: <RepositorySettingsLink />,
+                              }}
+                            />
                           </p>
                         )}
 

@@ -6,6 +6,7 @@ import type { IssuePage, IssueStatus } from '@/lib/issues'
 import type { CommentsPage, IssueDetail } from '@/lib/use-issue-detail'
 import { requestIssueRead } from '@/lib/use-issue-detail'
 import type { projectIssueComment } from '../../server/issue-detail'
+import { useRepositoryConfig } from '@/lib/use-repository-config'
 
 type Write =
   | { title: string; body?: string; status?: IssueStatus }
@@ -40,6 +41,7 @@ export function useIssueWrite(
   number?: number,
 ) {
   const client = useQueryClient()
+  const { data: config } = useRepositoryConfig()
   const submitting = useRef(false)
   const retryLimit = useRef<IssueReadError | null>(null)
   const mutation = useMutation({
@@ -109,6 +111,12 @@ export function useIssueWrite(
               'The remote description changed. Your local draft has not been saved.',
             status_label_protected:
               'Status labels can only be changed through Status.',
+            mapped_label_missing:
+              'The mapped status label does not exist. Select an existing label in repository settings.',
+            config_mapping_invalid:
+              'Status mapping is invalid. Select distinct existing labels for all required statuses.',
+            config_yaml_invalid:
+              'Repository YAML is invalid or uses unsupported syntax. Fix it in GitHub; it will not be overwritten.',
             assignee_not_applied:
               'GitHub did not apply this assignee change. The user may not be assignable or the issue may have reached its assignee limit.',
           }
@@ -218,7 +226,7 @@ export function useIssueWrite(
           const matches =
             first.state === issue.state &&
             (first.category === null ||
-              getIssueStatus(issue).status === first.category)
+              getIssueStatus(issue, config.mapping).status === first.category)
           const contained = data.pages.some((page) =>
             page.issues.some((item) => item.id === issue.id),
           )

@@ -7,12 +7,15 @@ import {
   useLocation,
   useMatch,
   useNavigate,
+  useBlocker,
 } from 'react-router'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Workspace } from '@/components/workspace'
 import { IssueDetail } from '@/components/issue-detail'
+import { RepositoryConfigProvider } from '@/components/repository-config'
 import { IssueReadError } from '@/lib/issues'
+import { hasUnsavedChanges } from '@/lib/use-unsaved-changes'
 
 type Repository = {
   id: number
@@ -33,6 +36,11 @@ export function WorkspaceSelector({
   onSessionExpired: () => void
 }) {
   const { t } = useTranslation()
+  useBlocker(
+    () =>
+      hasUnsavedChanges() &&
+      !window.confirm(t('You have unsaved changes. Leave and discard them?')),
+  )
   const client = useQueryClient()
   const location = useLocation()
   const navigate = useNavigate()
@@ -579,86 +587,93 @@ export function WorkspaceSelector({
         className="min-w-0 p-5 sm:p-6 lg:p-8"
         aria-busy={loading && !selected}
       >
-        {detailMatch && validIssueNumber && !error && (loading || selected) ? (
-          <IssueDetail
-            key={`${userId}:${owner}:${name}:${issueNumber}`}
-            userId={userId}
-            repository={
-              selected ?? {
-                id: null,
-                owner: owner ?? '',
-                name: name ?? '',
-                full_name: `${owner}/${name}`,
-                permissions: {},
-                installations: [],
+        <RepositoryConfigProvider
+          key={`${userId}:${selected?.id ?? 'none'}`}
+          userId={userId}
+          repository={selected ?? null}
+          onSessionExpired={onSessionExpired}
+        >
+          {detailMatch && validIssueNumber && !error && selected ? (
+            <IssueDetail
+              key={`${userId}:${owner}:${name}:${issueNumber}`}
+              userId={userId}
+              repository={
+                selected ?? {
+                  id: null,
+                  owner: owner ?? '',
+                  name: name ?? '',
+                  full_name: `${owner}/${name}`,
+                  permissions: {},
+                  installations: [],
+                }
               }
-            }
-            number={Number(issueNumber)}
-            onSessionExpired={onSessionExpired}
-          />
-        ) : loading && !selected ? (
-          <div role="status">
-            <span className="sr-only">{t('Loading workspace…')}</span>
-            <div aria-hidden="true">
-              <Skeleton className="h-4 w-44" />
-              <Skeleton className="mt-3 h-8 w-56 max-w-full" />
-              <Skeleton className="mt-3 h-5 w-48" />
+              number={Number(issueNumber)}
+              onSessionExpired={onSessionExpired}
+            />
+          ) : loading && !selected ? (
+            <div role="status">
+              <span className="sr-only">{t('Loading workspace…')}</span>
+              <div aria-hidden="true">
+                <Skeleton className="h-4 w-44" />
+                <Skeleton className="mt-3 h-8 w-56 max-w-full" />
+                <Skeleton className="mt-3 h-5 w-48" />
 
-              {/* Keep one loading region until real issue groups are available */}
-              <div className="mt-8 overflow-hidden rounded-xl border bg-card">
-                <div className="flex flex-wrap items-center justify-between gap-4 px-4 py-4">
-                  <span className="font-semibold">{t('Issues')}</span>
-                  <Skeleton className="h-8 w-40" />
-                </div>
-                <div className="flex min-h-72 flex-col items-center justify-center gap-4 border-t">
-                  <span className="relative block h-0.5 w-12 overflow-hidden rounded-full bg-foreground/10">
-                    <span className="absolute inset-y-0 left-1/3 w-1/3 rounded-full bg-foreground/50 motion-safe:animate-[issuel-loading_1.6s_ease-in-out_infinite]" />
-                  </span>
-                  <p className="text-xs text-muted-foreground">
-                    {t('Loading workspace…')}
-                  </p>
+                {/* Keep one loading region until real issue groups are available */}
+                <div className="mt-8 overflow-hidden rounded-xl border bg-card">
+                  <div className="flex flex-wrap items-center justify-between gap-4 px-4 py-4">
+                    <span className="font-semibold">{t('Issues')}</span>
+                    <Skeleton className="h-8 w-40" />
+                  </div>
+                  <div className="flex min-h-72 flex-col items-center justify-center gap-4 border-t">
+                    <span className="relative block h-0.5 w-12 overflow-hidden rounded-full bg-foreground/10">
+                      <span className="absolute inset-y-0 left-1/3 w-1/3 rounded-full bg-foreground/50 motion-safe:animate-[issuel-loading_1.6s_ease-in-out_infinite]" />
+                    </span>
+                    <p className="text-xs text-muted-foreground">
+                      {t('Loading workspace…')}
+                    </p>
+                  </div>
                 </div>
               </div>
             </div>
-          </div>
-        ) : error ? (
-          <h1 className="text-xl font-semibold">
-            {t('Workspace unavailable')}
-          </h1>
-        ) : (location.pathname !== '/' && !match) ||
-          (detailMatch && !validIssueNumber) ? (
-          <div>
-            <h1 className="text-xl font-semibold">{t('Page not found')}</h1>
-            <Link to="/" className="mt-4 inline-block underline">
-              {t('Choose a workspace')}
-            </Link>
-          </div>
-        ) : selected && listMatch ? (
-          <Workspace
-            key={`${userId}:${selected.id}`}
-            userId={userId}
-            repository={selected}
-            onSessionExpired={onSessionExpired}
-            scrollPositions={scrollPositions}
-          />
-        ) : (
-          <div>
+          ) : error ? (
             <h1 className="text-xl font-semibold">
-              {t(
-                match
-                  ? 'Repository not found or not authorized'
-                  : 'Choose a repository',
-              )}
+              {t('Workspace unavailable')}
             </h1>
-            <p className="mt-3 text-sm text-muted-foreground">
-              {t(
-                match
-                  ? 'This workspace is unavailable to your GitHub account and App. Choose another repository or update App access.'
-                  : 'Choose a repository from the sidebar to open its issues.',
-              )}
-            </p>
-          </div>
-        )}
+          ) : (location.pathname !== '/' && !match) ||
+            (detailMatch && !validIssueNumber) ? (
+            <div>
+              <h1 className="text-xl font-semibold">{t('Page not found')}</h1>
+              <Link to="/" className="mt-4 inline-block underline">
+                {t('Choose a workspace')}
+              </Link>
+            </div>
+          ) : selected && listMatch ? (
+            <Workspace
+              key={`${userId}:${selected.id}`}
+              userId={userId}
+              repository={selected}
+              onSessionExpired={onSessionExpired}
+              scrollPositions={scrollPositions}
+            />
+          ) : (
+            <div>
+              <h1 className="text-xl font-semibold">
+                {t(
+                  match
+                    ? 'Repository not found or not authorized'
+                    : 'Choose a repository',
+                )}
+              </h1>
+              <p className="mt-3 text-sm text-muted-foreground">
+                {t(
+                  match
+                    ? 'This workspace is unavailable to your GitHub account and App. Choose another repository or update App access.'
+                    : 'Choose a repository from the sidebar to open its issues.',
+                )}
+              </p>
+            </div>
+          )}
+        </RepositoryConfigProvider>
       </main>
     </div>
   )

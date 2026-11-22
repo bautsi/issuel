@@ -1,6 +1,7 @@
 import { githubResponse, RepositoryError } from './repositories.ts'
 import { projectIssueDetail } from './issue-detail.ts'
-import { defaultStatuses, getIssueStatus } from './issue-status.ts'
+import { getStatuses, getIssueStatus } from './issue-status.ts'
+import { readRepositoryConfig } from './repository-config.ts'
 
 /** Search one authorized repository with safely quoted labels and native status constraints. */
 export async function readIssueSearch(
@@ -12,7 +13,12 @@ export async function readIssueSearch(
   sort: string,
   page: number,
 ) {
-  const definition = defaultStatuses.find((item) => item.id === status)
+  const config = await readRepositoryConfig(accessToken, repositoryId)
+  if (config.validationErrors.length)
+    throw new RepositoryError('config_mapping_invalid', 422)
+  const mapping = config.mapping
+  const statuses = getStatuses(mapping)
+  const definition = statuses.find((item) => item.id === status)
   if (
     text.length > 256 ||
     [...text].some(
@@ -26,8 +32,10 @@ export async function readIssueSearch(
       (character) =>
         character.charCodeAt(0) < 32 || character.charCodeAt(0) === 127,
     ) ||
-    defaultStatuses.some(
-      (item) => item.state === 'open' && item.label === label.toLowerCase(),
+    statuses.some(
+      (item) =>
+        item.state === 'open' &&
+        item.label?.toLowerCase() === label.toLowerCase(),
     ) ||
     !['updated', 'created-desc', 'created-asc'].includes(sort) ||
     !Number.isSafeInteger(page) ||
@@ -59,12 +67,16 @@ export async function readIssueSearch(
   ]
   if (definition?.state === 'open') {
     qualifiers.push('state:open')
-    if (definition.id !== 'backlog')
-      qualifiers.push(`label:"${definition.label}"`)
+    if (definition.id !== 'backlog' && definition.label !== null)
+      qualifiers.push(`label:${JSON.stringify(definition.label)}`)
     // Backlog permits its explicit label or no mapping; every conflict is excluded.
-    for (const other of defaultStatuses) {
-      if (other.state === 'open' && other.id !== definition.id)
-        qualifiers.push(`-label:"${other.label}"`)
+    for (const other of statuses) {
+      if (
+        other.state === 'open' &&
+        other.id !== definition.id &&
+        other.label !== null
+      )
+        qualifiers.push(`-label:${JSON.stringify(other.label)}`)
     }
   } else if (definition?.state === 'closed') {
     qualifiers.push(
@@ -129,7 +141,7 @@ export async function readIssueSearch(
       throw new RepositoryError('github_invalid_response', 502)
     // Reject the entire page on index drift; never silently filter a single page.
     if (
-      (status !== 'all' && getIssueStatus(issue).status !== status) ||
+      (status !== 'all' && getIssueStatus(issue, mapping).status !== status) ||
       (label &&
         !issue.labels.some(
           (item) => item.name.toLowerCase() === label.toLowerCase(),
@@ -139,6 +151,7 @@ export async function readIssueSearch(
     return issue
   })
   return {
+    mappingSha: config.sha,
     issues: issues.slice(0, Math.max(0, 1000 - (page - 1) * 30)),
     page,
     perPage: 30,

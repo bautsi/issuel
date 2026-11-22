@@ -4,33 +4,55 @@ import {
   projectIssueDetail,
   readIssueDetail,
 } from './issue-detail.ts'
-import { defaultStatuses, getIssueStatus } from './issue-status.ts'
+import {
+  defaultStatusMapping,
+  getStatuses,
+  getIssueStatus,
+} from './issue-status.ts'
+import type { OpenIssueStatus } from './issue-status.ts'
+import { readStatusMapping } from './repository-config.ts'
 
 const pendingWrites = new Map<string, Promise<unknown>>()
 
-/** Resolve a required Open label, creating it only for an explicit write and never retrying POST. */
-async function ensureStatusLabel(
+/** Reuse mapped labels and create a missing default only for an explicit issue write. */
+async function resolveStatusLabel(
   access: string,
   fullName: string,
-  name: string,
+  status: { id: OpenIssueStatus; label: string | null },
 ) {
-  const path = `/repos/${fullName}/labels/${encodeURIComponent(name)}`
+  const label = status.label
+  if (label === null) return null
+
+  const labelsPath = `/repos/${fullName}/labels`
+  const labelPath = `${labelsPath}/${encodeURIComponent(label)}`
   try {
-    await githubResponse(path, access)
-    return
+    await githubResponse(labelPath, access)
+    return label
   } catch (error) {
     if (!(error instanceof RepositoryError) || error.status !== 404) throw error
   }
+
+  if (status.id === 'backlog') return null
+  if (label.toLowerCase() !== defaultStatusMapping[status.id]?.toLowerCase())
+    throw new RepositoryError('mapped_label_missing', 422)
+
   try {
-    await githubResponse(`/repos/${fullName}/labels`, access, {
+    await githubResponse(labelsPath, access, {
       method: 'POST',
-      body: { name, color: '6e7681' },
+      body: { name: label, color: '6e7681' },
     })
   } catch (error) {
-    // Another request may have created this exact label; verify it rather than replaying POST.
     if (!(error instanceof RepositoryError) || error.status !== 422) throw error
-    await githubResponse(path, access)
+    // Another issue write may have created this label first.
+    try {
+      await githubResponse(labelPath, access)
+    } catch (lookupError) {
+      if (lookupError instanceof RepositoryError && lookupError.status === 404)
+        throw error
+      throw lookupError
+    }
   }
+  return label
 }
 
 /** Create one issue from validated fields and confirm the status using the provider response. */
@@ -42,7 +64,8 @@ export async function createIssue(
   if (!input || typeof input !== 'object' || Array.isArray(input))
     throw new RepositoryError('invalid_issue_write', 400)
   const fields = input as Record<string, unknown>
-  const status = defaultStatuses.find(
+  const mapping = await readStatusMapping(access, repositoryId)
+  const status = getStatuses(mapping).find(
     (item) => item.id === fields.status && item.state === 'open',
   )
   if (
@@ -68,8 +91,11 @@ export async function createIssue(
     !metadata.default_branch
   )
     throw new RepositoryError('github_invalid_response', 502)
-  if (status.id !== 'backlog')
-    await ensureStatusLabel(access, metadata.full_name, status.label)
+  const statusLabel = await resolveStatusLabel(
+    access,
+    metadata.full_name,
+    status,
+  )
   const { data } = await githubResponse(
     `/repos/${metadata.full_name}/issues`,
     access,
@@ -78,7 +104,7 @@ export async function createIssue(
       body: {
         title: fields.title.trim(),
         body: fields.body ?? '',
-        labels: status.id === 'backlog' ? [] : [status.label],
+        labels: statusLabel === null ? [] : [statusLabel],
       },
     },
   )
@@ -90,14 +116,14 @@ export async function createIssue(
     throw new RepositoryError('github_write_uncertain', 502)
   const issue = projectIssueDetail(data, repository, repositoryId, number)
   if (
-    getIssueStatus(issue).status !== status.id ||
+    getIssueStatus(issue, mapping).status !== status.id ||
     issue.title !== fields.title.trim()
   )
     throw new RepositoryError('github_write_not_applied', 409)
   return issue
 }
 
-/** Serialize issue writes, compare raw description baselines and patch only the requested fields. */
+/** Serialize issue writes, using the mapped label when explicitly changing status. */
 export async function updateIssue(
   access: string,
   repositoryId: number,
@@ -125,16 +151,24 @@ export async function updateIssue(
     typeof fields.assignee === 'string' &&
     !!fields.assignee.trim() &&
     typeof fields.remove === 'boolean'
+  const mapping =
+    labelWrite ||
+    getStatuses().some(
+      (status) => status.state === 'open' && status.id === fields.status,
+    )
+      ? await readStatusMapping(access, repositoryId)
+      : defaultStatusMapping
+  const statuses = getStatuses(mapping)
   if (
     labelWrite &&
-    defaultStatuses.some(
+    statuses.some(
       (status) =>
         status.state === 'open' &&
-        status.label === (fields.label as string).toLowerCase(),
+        status.label?.toLowerCase() === (fields.label as string).toLowerCase(),
     )
   )
     throw new RepositoryError('status_label_protected', 422)
-  const status = defaultStatuses.find((item) => item.id === fields.status)
+  const status = statuses.find((item) => item.id === fields.status)
   if (
     !descriptionWrite &&
     !titleWrite &&
@@ -262,27 +296,29 @@ export async function updateIssue(
           body.duplicate_issue_id = target.id
         }
       } else {
-        if (getIssueStatus(current).status === 'conflict')
+        if (getIssueStatus(current, mapping).status === 'conflict')
           throw new RepositoryError('status_mapping_conflict', 409)
         if (
           current.state === 'open' &&
-          getIssueStatus(current).status === status.id
+          getIssueStatus(current, mapping).status === status.id
         )
           return current
-        if (status.id !== 'backlog')
-          await ensureStatusLabel(access, current.full_name, status.label)
+        const statusLabel = await resolveStatusLabel(
+          access,
+          current.full_name,
+          status,
+        )
         body.labels = current.labels
           .filter(
             (label) =>
-              !defaultStatuses.some(
+              !statuses.some(
                 (mapped) =>
                   mapped.state === 'open' &&
-                  mapped.label === label.name.toLowerCase(),
+                  mapped.label?.toLowerCase() === label.name.toLowerCase(),
               ),
           )
           .map((label) => label.name)
-        if (status.id !== 'backlog')
-          (body.labels as string[]).push(status.label)
+        if (statusLabel !== null) (body.labels as string[]).push(statusLabel)
         if (current.state === 'closed') body.state = 'open'
       }
     }
@@ -307,7 +343,7 @@ export async function updateIssue(
     if (
       titleWrite
         ? issue.title !== body.title
-        : getIssueStatus(issue).status !== status?.id
+        : getIssueStatus(issue, mapping).status !== status?.id
     )
       throw new RepositoryError('github_write_not_applied', 409)
     return issue

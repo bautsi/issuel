@@ -1,4 +1,4 @@
-// Pure Issuel product defaults shared by the API and UI; repository settings remain future work.
+// Status identity and native Closed reasons are shared by the API and UI.
 export const defaultStatuses = [
   {
     id: 'inProgress',
@@ -60,21 +60,74 @@ export type ClosedIssueStatus = Extract<
   { state: 'closed' }
 >['id']
 
+export type OpenIssueStatus = Exclude<IssueStatus, ClosedIssueStatus>
+export type StatusMapping = Record<OpenIssueStatus, string | null>
+export const defaultStatusMapping = Object.fromEntries(
+  defaultStatuses
+    .filter((status) => status.state === 'open')
+    .map((status) => [status.id, status.label]),
+) as StatusMapping
+
+/** Apply repository labels without changing status identities or native Closed reasons. */
+export function getStatuses(mapping: StatusMapping = defaultStatusMapping) {
+  return defaultStatuses.map((status) =>
+    status.state === 'open' ? { ...status, label: mapping[status.id] } : status,
+  )
+}
+
+/** Require existing custom labels and warn about missing defaults outside Backlog. */
+export function validateStatusMapping(
+  mapping: StatusMapping,
+  labels: string[],
+) {
+  const errors: string[] = []
+  const missingDefaultLabels: string[] = []
+  const existing = new Set(labels.map((label) => label.toLowerCase()))
+  const seen = new Set<string>()
+  for (const status of getStatuses(mapping)) {
+    if (status.state !== 'open') continue
+    if (status.label === null && status.id === 'backlog') continue
+    if (typeof status.label !== 'string' || !status.label.trim()) {
+      errors.push('Every Open status except Backlog requires a label.')
+      continue
+    }
+    const name = status.label.toLowerCase()
+    if (!existing.has(name)) {
+      if (name !== defaultStatusMapping[status.id]?.toLowerCase()) {
+        errors.push(`Mapped label does not exist: ${status.label}`)
+      } else if (status.id !== 'backlog') {
+        missingDefaultLabels.push(status.label)
+      }
+    }
+    if (seen.has(name)) errors.push('Open statuses must use distinct labels.')
+    seen.add(name)
+  }
+  return { errors, missingDefaultLabels }
+}
+
 /** Resolve Closed by GitHub reason and Open by mapped labels, retaining explicit Open conflicts. */
-export function getIssueStatus<Label extends { name: string }>(issue: {
-  state: 'open' | 'closed'
-  state_reason?: string | null
-  labels: Label[]
-}) {
-  const mapped = defaultStatuses.filter(
+export function getIssueStatus<Label extends { name: string }>(
+  issue: {
+    state: 'open' | 'closed'
+    state_reason?: string | null
+    labels: Label[]
+  },
+  mapping: StatusMapping = defaultStatusMapping,
+) {
+  const statuses = getStatuses(mapping)
+  const mapped = statuses.filter(
     (status) =>
       status.state === 'open' &&
       status.label !== null &&
-      issue.labels.some((label) => label.name.toLowerCase() === status.label),
+      issue.labels.some(
+        (label) => label.name.toLowerCase() === status.label?.toLowerCase(),
+      ),
   )
   const labels = issue.labels.filter(
     (label) =>
-      !mapped.some((status) => label.name.toLowerCase() === status.label),
+      !mapped.some(
+        (status) => label.name.toLowerCase() === status.label?.toLowerCase(),
+      ),
   )
   if (issue.state === 'closed') {
     const closed = defaultStatuses.find(

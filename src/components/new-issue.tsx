@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router'
-import { useTranslation } from 'react-i18next'
+import { Trans, useTranslation } from 'react-i18next'
+import { RepositorySettingsLink } from '@/components/repository-settings'
 import { Button } from '@/components/ui/button'
 import {
   Select,
@@ -9,7 +10,8 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
-import { defaultStatuses, IssueReadError } from '@/lib/issues'
+import { IssueReadError } from '@/lib/issues'
+import { useRepositoryStatuses } from '@/lib/use-repository-config'
 import type { IssueStatus } from '@/lib/issues'
 import { useIssueWrite } from '@/lib/use-issue-write'
 import { MarkdownEditor } from '@/components/markdown-editor'
@@ -29,6 +31,7 @@ export function NewIssue({
   onSessionExpired: () => void
 }) {
   const { t } = useTranslation()
+  const defaultStatuses = useRepositoryStatuses()
   const navigate = useNavigate()
   const [dialog, setDialog] = useState<HTMLDialogElement | null>(null)
   const mounted = useRef(true)
@@ -210,7 +213,10 @@ export function NewIssue({
           )}
           {write.error && (
             <p role="alert" className="text-xs text-destructive">
-              {t(write.error.message)}
+              <Trans
+                i18nKey={write.error.message}
+                components={{ settingsLink: <RepositorySettingsLink /> }}
+              />
             </p>
           )}
           <div className="flex justify-end gap-2">

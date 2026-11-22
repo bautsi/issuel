@@ -21,6 +21,7 @@ import {
   readIssueComments,
   readIssueDetail,
   readIssueOptions,
+  readUnusedStatusLabels,
 } from './issue-detail.ts'
 import {
   changeIssueComment,
@@ -30,6 +31,10 @@ import {
 } from './issue-writes.ts'
 import { defaultStatuses } from './issue-status.ts'
 import { githubFetch } from './logging.ts'
+import {
+  readRepositoryConfig,
+  saveRepositoryConfig,
+} from './repository-config.ts'
 
 const FLOW_TTL = 10 * 60_000
 const SESSION_TTL = 30 * 24 * 60 * 60_000
@@ -639,17 +644,19 @@ export function createAuth() {
   })
 
   app.on(
-    ['GET', 'POST', 'PATCH', 'DELETE'],
+    ['GET', 'POST', 'PATCH', 'DELETE', 'PUT'],
     [
       '/auth/session',
       '/repositories',
       '/workspaces/:owner/:repo',
       '/repositories/:repositoryId/issues',
       '/repositories/:repositoryId/search',
+      '/repositories/:repositoryId/config',
       '/repositories/:repositoryId/issues/:number',
       '/repositories/:repositoryId/issues/:number/comments',
       '/repositories/:repositoryId/issues/:number/comments/:commentId',
       '/repositories/:repositoryId/labels',
+      '/repositories/:repositoryId/status-label-usage',
       '/repositories/:repositoryId/assignees',
     ],
     async (c) => {
@@ -657,6 +664,8 @@ export function createAuth() {
       if (
         writing &&
         !(
+          (c.req.method === 'PUT' &&
+            /^\/api\/repositories\/[1-9]\d*\/config$/.test(c.req.path)) ||
           (c.req.method === 'POST' &&
             /^\/api\/repositories\/[1-9]\d*\/issues$/.test(c.req.path)) ||
           (c.req.method === 'POST' &&
@@ -740,6 +749,44 @@ export function createAuth() {
             (item) => String(item.id) === repositoryId,
           )
           if (!repository) return c.json({ error: 'workspace_not_found' }, 404)
+          if (c.req.path.endsWith('/config')) {
+            if (
+              !repository.installations.some((installation) =>
+                ['read', 'write'].includes(installation.permissions.contents),
+              )
+            )
+              return c.json({ error: 'contents_read_required' }, 403)
+            if (
+              writing &&
+              (!repository.permissions.push ||
+                !repository.installations.some(
+                  (installation) =>
+                    installation.permissions.contents === 'write',
+                ))
+            )
+              return c.json({ error: 'contents_write_required' }, 403)
+            if (
+              writing &&
+              !c.req.header('Content-Type')?.startsWith('application/json')
+            )
+              return c.json({ error: 'config_mapping_invalid' }, 400)
+            const config = writing
+              ? await saveRepositoryConfig(
+                  token,
+                  repository.id,
+                  await c.req.json().catch(() => null),
+                )
+              : await readRepositoryConfig(token, repository.id)
+            // Only mapping metadata leaves the server; unrelated YAML stays private.
+            return c.json({
+              userId: session.github_user_id,
+              repositoryId: repository.id,
+              mapping: config.mapping,
+              sha: config.sha,
+              branch: config.branch,
+              validationErrors: config.validationErrors,
+            })
+          }
           if (
             !repository.installations.some((installation) =>
               ['read', 'write'].includes(installation.permissions.issues),
@@ -816,6 +863,16 @@ export function createAuth() {
                 c.req.query('sort') ?? 'updated',
                 Number(page),
               )),
+              userId: session.github_user_id,
+              repositoryId: repository.id,
+            }
+          } else if (c.req.path.endsWith('/status-label-usage')) {
+            result = {
+              unusedLabels: await readUnusedStatusLabels(
+                token,
+                repository,
+                c.req.queries('label') ?? [],
+              ),
               userId: session.github_user_id,
               repositoryId: repository.id,
             }

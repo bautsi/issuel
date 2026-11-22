@@ -1,5 +1,4 @@
 import { githubResponse, RepositoryError } from './repositories.ts'
-import { defaultStatuses } from './issue-status.ts'
 
 /** Accept only the public identity used by the reading view, including deleted accounts. */
 function readUser(value: unknown) {
@@ -278,6 +277,67 @@ export function projectIssueComment(value: unknown, issueUrl: string) {
   }
 }
 
+/** Find mapped labels with no open or closed issues, excluding pull requests. */
+export async function readUnusedStatusLabels(
+  access: string,
+  repository: { id: number; full_name: string },
+  requested: string[],
+) {
+  if (
+    requested.length < 1 ||
+    requested.length > 3 ||
+    requested.some((label) => !label.trim() || label.length > 100)
+  )
+    throw new RepositoryError('invalid_label_usage_parameters', 400)
+
+  const labels = [...new Set(requested)]
+  const [owner, name] = repository.full_name.split('/')
+  const args = labels.map((_, index) => `$label${index}: String!`).join(', ')
+  const fields = labels.map(
+    (_, index) =>
+      `label${index}: label(name: $label${index}) { issues(first: 1, states: [OPEN, CLOSED]) { totalCount } }`,
+  )
+  const { data } = await githubResponse('/graphql', access, {
+    method: 'POST',
+    body: {
+      query: `query($owner: String!, $name: String!, ${args}) {
+        repository(owner: $owner, name: $name, followRenames: false) {
+          fullDatabaseId
+          ${fields.join('\n')}
+        }
+      }`,
+      variables: {
+        owner,
+        name,
+        ...Object.fromEntries(
+          labels.map((label, index) => [`label${index}`, label]),
+        ),
+      },
+    },
+  })
+  const result = data as {
+    errors?: unknown[]
+    data?: { repository?: Record<string, unknown> | null }
+  } | null
+  const details = result?.data?.repository
+  if (
+    result?.errors?.length ||
+    !details ||
+    String(details.fullDatabaseId) !== String(repository.id)
+  )
+    throw new RepositoryError('github_invalid_response', 502)
+
+  return labels.filter((_, index) => {
+    const label = details[`label${index}`] as
+      { issues?: { totalCount?: number } } | null | undefined
+    if (label === null) return true
+    const count = label?.issues?.totalCount
+    if (typeof count !== 'number' || !Number.isSafeInteger(count) || count < 0)
+      throw new RepositoryError('github_invalid_response', 502)
+    return count === 0
+  })
+}
+
 /** Enumerate the current repository's existing choices without accepting a partial options list. */
 export async function readIssueOptions(
   access: string,
@@ -321,18 +381,11 @@ export async function readIssueOptions(
           !/^[a-f0-9]{6}$/i.test(label.color)
         )
           throw new RepositoryError('github_invalid_response', 502)
-        const name = label.name
-        if (
-          !defaultStatuses.some(
-            (status) =>
-              status.state === 'open' && status.label === name.toLowerCase(),
-          )
-        )
-          labels.push({
-            id: Number(label.id),
-            name: label.name,
-            color: label.color,
-          })
+        labels.push({
+          id: Number(label.id),
+          name: label.name,
+          color: label.color,
+        })
       }
     }
     const next = link?.split(',').find((part) => /;\s*rel="next"/.test(part))

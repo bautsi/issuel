@@ -9,6 +9,7 @@ import type { readIssueSearch } from '../../server/issue-search'
 import type { readIssueOptions } from '../../server/issue-detail'
 import { IssueReadError } from '@/lib/issues'
 import { requestIssueRead } from '@/lib/use-issue-detail'
+import { useRepositoryConfig } from '@/lib/use-repository-config'
 
 type SearchPage = Awaited<ReturnType<typeof readIssueSearch>> & {
   userId: string
@@ -28,13 +29,14 @@ export function useIssueSearch(
   enabled = true,
 ) {
   const client = useQueryClient()
+  const { data: config } = useRepositoryConfig()
   const active = !groupByStatus || !!text || status !== 'all' || !!label
   const queryKey = [
     'github',
     userId,
     repositoryId,
     'issue-search',
-    { text, status, label, sort, perPage: 30 },
+    { text, status, label, sort, perPage: 30, mappingSha: config.sha },
   ] as const
   const refreshKey = [...queryKey, 'refresh'] as const
   const isRefreshing = useIsFetching({ queryKey: refreshKey, exact: true }) > 0
@@ -85,6 +87,11 @@ export function useIssueSearch(
         throw new IssueReadError(
           'Your GitHub session changed. Connect GitHub again.',
           401,
+        )
+      if (data.mappingSha !== config.sha)
+        throw new IssueReadError(
+          'Repository config changed. Reload remote config before searching again.',
+          409,
         )
       if (
         data.repositoryId !== repositoryId ||

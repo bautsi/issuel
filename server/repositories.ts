@@ -38,7 +38,7 @@ export async function githubResponse(
   path: string,
   accessToken: string,
   write?: {
-    method: 'POST' | 'PATCH' | 'DELETE'
+    method: 'POST' | 'PATCH' | 'DELETE' | 'PUT'
     body: Record<string, unknown>
   },
 ) {

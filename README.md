@@ -11,6 +11,42 @@ GitHub is the source of truth for issues. SQLite stores authentication sessions 
 - Markdown descriptions, comments and issue properties.
 - Issue creation, inline title editing, status changes and reopening.
 - English and Traditional Chinese interface languages.
+- Repository-specific Open status label mapping stored in GitHub.
+
+## Repository status mapping
+
+Open **Settings → Status mapping** in a repository workspace. If the config is missing, select **Initialize & Save** to create it with the defaults, or choose existing GitHub labels first. Once the config exists, select **Save Changes** to apply edits. **Cancel** resets unsaved choices. Settings are stored only in `.github/issuel-client.yml` on the repository's default branch:
+
+```yaml
+statusLabels:
+  backlog: null
+  todo: 'status:todo'
+  inProgress: 'status:in-progress'
+  inReview: 'status:in-review'
+```
+
+The three non-Backlog entries require distinct labels. `backlog` may be omitted or `null`, or name its own distinct label. Custom labels must already exist. Open issues without any mapped label always display Backlog. Multiple mapped labels remain an explicit issue conflict. Unmapped labels are ordinary labels. Closed statuses always use GitHub's native `state_reason`; the existing null-reason conflict handling is unchanged.
+
+If the file is confirmed absent, the original `status:backlog`, `status:todo`, `status:in-progress` and `status:in-review` defaults apply. Settings list non-Backlog status labels that no open or closed Issue uses. This advisory helps with migrations and does not block saving. Creating an Issue or changing its status creates the selected non-Backlog default label if needed. Backlog can still use the unlabeled fallback.
+
+The server exposes `GET /api/repositories/:repositoryId/config` and `PUT /api/repositories/:repositoryId/config`. PUT accepts `{ mapping, sha, branch }` using the same four status IDs as YAML. These authenticated, repository-scoped endpoints use the server-side GitHub user access token with the REST Contents API. Reads require App **Contents: Read**; saves require **Contents: Read and write** and user push access. Grant the updated permission to existing App installations as well. Issues permission remains necessary for listing existing label choices.
+
+Updates send the baseline file SHA; initial creation omits SHA. A changed SHA or default branch stops the save. **Reload remote config** obtains the latest baseline and keeps your draft for review; **Cancel** then restores the newly loaded remote mapping. Saves and uncertain writes are never retried automatically. A lost response can leave a committed save on GitHub, so reload before retrying.
+
+No YAML dependency is added: the supported format is a single document of block mappings with two-space indentation, simple keys, scalar values, quoted strings and comments. Unrelated supported fields are retained, including their text and comments. Sequences, flow collections, aliases, tags, multiline scalars, duplicate keys and other unsupported/ambiguous YAML stop reading/saving with an explicit error; edit these files in GitHub before retrying. Config size is limited to 64 KB.
+
+Config queries are isolated by GitHub user and repository. Saving updates that repository's config cache and reuses loaded issue data; searches also include the config SHA in their cache identity. Reenter the workspace or use manual refresh/reload to obtain external changes. Search text still submits only through the explicit Search action. Config operations never create labels, initialize issues or bulk rewrite issue labels.
+
+### Manual acceptance
+
+1. In an empty repository with Contents access, confirm default grouping and the unused-label advisory. Select **Initialize & Save** without edits, inspect the YAML on the default branch, then confirm the button changes to **Save Changes**. Open two sessions before initializing to verify that the second initialization reports a conflict.
+2. In a repository with no config, map Todo to a different existing label before selecting **Initialize & Save**. Reload the app or open a second device and confirm the same mapping.
+3. Check grouping, detail status, issue creation, transitions and Search with that label. Confirm ordinary labels remain and old unmapped status labels become ordinary labels.
+4. Check unlabeled Backlog, explicit Backlog mapping and multiple-status-label conflicts. Save never modifies existing issues.
+5. Close issues as Done/Canceled/Duplicate and verify native reasons; an older null reason retains conflict handling.
+6. Select duplicate labels or remove a custom mapped label in GitHub and confirm validation blocks **Save Changes**. Change the config in GitHub after editing starts, then save: remote content must remain intact, the draft must remain, and Reload must allow review before another explicit save.
+7. Switch repositories/accounts while loading and confirm mappings/results stay isolated. Type search text without pressing Search and confirm no text search is sent.
+8. Verify read-only Contents, missing Contents write, push restrictions, rate limiting and offline failures show feedback without silently using defaults or replaying a save.
 
 ## Getting started
 
